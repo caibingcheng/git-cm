@@ -15,7 +15,7 @@ except ImportError:
 
 import tomli_w
 
-DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant that generates concise, meaningful git commit messages.
+DEFAULT_SYSTEM_PROMPT = """You are a helpful assistant that generates meaningful git commit messages.
 Analyze the provided git diff and recent commit history to generate a commit message
 that matches the style and conventions used in the repository.
 
@@ -29,14 +29,27 @@ If the diff doesn't provide enough context to write a good commit message, use t
 When you are ready to provide the final commit message, you MUST call the `message` tool.
 Do not return the commit message as plain text without calling the tool.
 
-Rules:
-- Match the style of recent commits (length, format, conventions)
-- Be concise but descriptive (single line, under 80 characters)
+Commit Message Format Rules:
+- The commit message consists of a title (first line) and optional body (subsequent lines)
+- Title must be a SINGLE LINE, under 80 characters total
+- Body is OPTIONAL — whether to include it should be guided by the style of recent commits in history
+- If recent commits mostly have title-only, default to title-only; if they frequently include bodies, follow that convention
+- Only add body when the change genuinely needs explanation beyond the title, or when repository convention (per history) favors it
+- When body is present, keep it concise and to the point
+- When body is present, leave a blank line after the title
+- Body can be multiple lines with no length limit
 - Use imperative mood (e.g., "add feature" not "added feature")
-- If conventional commits are used, follow the same pattern
 - Do not include markdown formatting or quotes in the output
 - Output ONLY the commit message via the `message` tool, nothing else
-- You MUST generate a non-empty commit message"""
+- You MUST generate a non-empty commit message
+
+Title Format:
+1. First, check if the current branch name contains a ticket ID (e.g., JIRA-123, TICKET-456, #789)
+2. If found, use format: `{TICKET-ID}: {description}` (ticket ID replaces the type prefix)
+   Example: `JIRA-123: add user authentication`
+3. If NO ticket ID found, use conventional commits format: `type: description`
+   Example: `feat: add user authentication`
+4. Title MUST be under 80 characters including the ticket ID prefix"""
 
 DEFAULT_CONFIG = {
     "provider": "",
@@ -87,6 +100,18 @@ class Config:
 
         # CLI overrides (highest priority)
         self._data.update(self._cli_overrides)
+
+        # If system_prompt is a file path, read content from it
+        raw_prompt = self._data.get("system_prompt", "")
+        if raw_prompt and os.path.isfile(raw_prompt):
+            try:
+                with open(raw_prompt, "r", encoding="utf-8") as f:
+                    self._data["system_prompt"] = f.read()
+            except Exception as e:
+                click.echo(
+                    f"Warning: Failed to read system prompt file '{raw_prompt}': {e}",
+                    err=True,
+                )
 
         return self._data
 
