@@ -8,6 +8,7 @@ import pytest
 from git import Repo
 
 from git_cm.git_utils import (
+    get_current_branch,
     check_user_in_history,
     commit_changes,
     find_agents_md,
@@ -395,3 +396,24 @@ class TestGrepRepo:
         # Last line should be truncation note
         assert "[Note:" in lines[-1]
         assert "total matches" in lines[-1]
+
+
+class TestGetCurrentBranch:
+    """Test current branch retrieval."""
+
+    def test_get_current_branch(self, temp_git_repo):
+        """Test getting current branch name."""
+        repo = get_repo(temp_git_repo)
+        branch = get_current_branch(repo)
+        
+        assert branch == "master"
+
+    def test_get_current_branch_new_repo(self, tmp_path):
+        """Test new repo without commits returns None."""
+        repo_path = tmp_path / "new-repo"
+        repo_path.mkdir()
+        repo = Repo.init(repo_path)
+        
+        branch = get_current_branch(repo)
+        
+        assert branch == "master"

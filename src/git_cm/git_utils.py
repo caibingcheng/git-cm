@@ -26,7 +26,7 @@ def get_repo(path: Path) -> Repo:
 def has_staged_changes(repo: Repo) -> bool:
     """Check if there are staged changes in the repository."""
     try:
-        return len(repo.index.diff("HEAD")) > 0 or bool(repo.index.diff(None))
+        return len(repo.index.diff("HEAD")) > 0
     except Exception:
         # New repository without any commits (no HEAD)
         return len(repo.index.entries) > 0
@@ -56,6 +56,17 @@ def get_recent_commits(repo: Repo, n: int = 5) -> list:
         return []
 
 
+def get_current_branch(repo: Repo) -> Optional[str]:
+    """Get the current branch name.
+    
+    Returns None if no branch exists (e.g., new repo without commits).
+    """
+    try:
+        return repo.active_branch.name
+    except Exception:
+        return None
+
+
 def check_user_in_history(repo: Repo, name: str, email: str) -> bool:
     """Check if the user's name or email appears in commit history."""
     try:
@@ -74,7 +85,8 @@ def get_staged_diff(repo: Repo) -> str:
     try:
         diff = repo.git.diff("--cached")
         return diff
-    except Exception:
+    except Exception as e:
+        click.echo(f"Warning: Failed to get staged diff: {e}", err=True)
         return ""
 
 

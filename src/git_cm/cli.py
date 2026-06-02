@@ -16,6 +16,7 @@ from git_cm.git_utils import (
     check_user_in_history,
     commit_changes,
     find_agents_md,
+    get_current_branch,
     get_recent_commits,
     get_repo,
     get_staged_diff,
@@ -27,7 +28,7 @@ from git_cm.git_utils import (
 )
 from git_cm.llm import ToolResult, create_provider
 from git_cm.prompt import build_prompt
-from git_cm.style import analyze_style
+
 
 
 class Spinner:
@@ -141,7 +142,6 @@ def main(provider, model, api_key, api_base, yes):
     #     click.echo()
 
     # Analyze style
-    style_features = analyze_style(recent_commits)
 
     # Get staged diff
     diff = get_staged_diff(repo)
@@ -155,8 +155,18 @@ def main(provider, model, api_key, api_base, yes):
     if agents_md_content:
         click.echo("Found AGENTS.md, including project conventions.")
 
+    # Append AGENTS.md to system prompt
+    system_prompt = config.system_prompt
+    if agents_md_content:
+        system_prompt = system_prompt + "\n\nProject conventions (from AGENTS.md):\n" + agents_md_content
+
+    # Get current branch
+    current_branch = get_current_branch(repo)
+
     # Generate prompt
-    prompt = build_prompt(diff, recent_commits, style_features, agents_md_content)
+    prompt = build_prompt(diff, recent_commits)
+    if current_branch:
+        prompt = f"Current branch: {current_branch}\n\n" + prompt
 
     # Create LLM provider
     try:
@@ -187,7 +197,7 @@ def main(provider, model, api_key, api_base, yes):
 
     try:
         while tool_call_count < max_tool_calls:
-            response = llm_provider.generate(config.system_prompt, messages)
+            response = llm_provider.generate(system_prompt, messages)
 
             spinner.stop()
             if response.reasoning_content:
