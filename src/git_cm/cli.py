@@ -69,14 +69,21 @@ def show_reasoning(content: str) -> None:
     click.echo(click.style("Thought: ", fg="cyan") + click.style(f"{content}\n", fg="bright_black"))
 
 
+def verbose_echo(enabled: bool, message: str, **kwargs) -> None:
+    """Print message only when verbose mode is enabled."""
+    if enabled:
+        click.echo(click.style("[verbose] ", fg="magenta") + message, **kwargs)
+
+
 @click.command()
 @click.option("--provider", help="LLM provider (openai or anthropic)")
 @click.option("--model", help="Model name")
 @click.option("--api-key", help="API key")
 @click.option("--api-base", help="Custom API base URL")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation and commit directly")
+@click.option("--verbose", is_flag=True, help="Enable verbose output for debugging")
 @click.version_option(version="0.1.0")
-def main(provider, model, api_key, api_base, yes):
+def main(provider, model, api_key, api_base, yes, verbose):
     """AI-powered git commit message generator."""
     # Initialize configuration
     config = Config()
@@ -117,6 +124,8 @@ def main(provider, model, api_key, api_base, yes):
     user_email = user_config["email"]
 
     click.echo(f"Git user: {user_name} <{user_email}>")
+    verbose_echo(verbose, f"Working directory: {current_dir}")
+    verbose_echo(verbose, f"Repo path: {repo.working_tree_dir}")
 
     # Check if user appears in history
     if not check_user_in_history(repo, user_name, user_email):
@@ -133,18 +142,19 @@ def main(provider, model, api_key, api_base, yes):
     # Get recent commits
     recent_commits = get_recent_commits(repo, n=5)
     click.echo(f"Found {len(recent_commits)} recent commits")
-    # if recent_commits:
-    #     click.echo()
-    #     for i, commit in enumerate(recent_commits, 1):
-    #         # Show first line only for display
-    #         first_line = commit.split("\n")[0]
-    #         click.echo(f"  {i}. {first_line}")
-    #     click.echo()
+    if verbose and recent_commits:
+        for i, commit in enumerate(recent_commits, 1):
+            first_line = commit.split("\n")[0]
+            verbose_echo(verbose, f"  Commit {i}: {first_line}")
+
+    # Analyze style
+
 
     # Analyze style
 
     # Get staged diff
     diff = get_staged_diff(repo)
+    verbose_echo(verbose, f"Diff length: {len(diff)} characters")
 
     if not diff.strip():
         click.echo("Error: Could not retrieve staged diff.", err=True)
@@ -154,6 +164,9 @@ def main(provider, model, api_key, api_base, yes):
     agents_md_content = find_agents_md(repo)
     if agents_md_content:
         click.echo("Found AGENTS.md, including project conventions.")
+        verbose_echo(verbose, f"AGENTS.md length: {len(agents_md_content)} characters")
+    else:
+        verbose_echo(verbose, "No AGENTS.md found")
 
     # Append AGENTS.md to system prompt
     system_prompt = config.system_prompt
@@ -162,11 +175,26 @@ def main(provider, model, api_key, api_base, yes):
 
     # Get current branch
     current_branch = get_current_branch(repo)
+    if current_branch:
+        verbose_echo(verbose, f"Current branch: {current_branch}")
+    else:
+        verbose_echo(verbose, "No current branch (new repo without commits)")
 
     # Generate prompt
     prompt = build_prompt(diff, recent_commits)
     if current_branch:
         prompt = f"Current branch: {current_branch}\n\n" + prompt
+
+    verbose_echo(verbose, f"User prompt length: {len(prompt)} characters")
+    if verbose:
+        click.echo(click.style("[verbose] System prompt:", fg="magenta"))
+        click.echo("-" * 40)
+        click.echo(system_prompt)
+        click.echo("-" * 40)
+        click.echo(click.style("[verbose] User prompt:", fg="magenta"))
+        click.echo("-" * 40)
+        click.echo(prompt)
+        click.echo("-" * 40)
 
     # Create LLM provider
     try:
@@ -197,9 +225,14 @@ def main(provider, model, api_key, api_base, yes):
 
     try:
         while tool_call_count < max_tool_calls:
+            verbose_echo(verbose, f"Sending request to {config.provider} ({config.model})...")
+            if verbose and messages:
+                verbose_echo(verbose, f"Messages count: {len(messages)}")
+
             response = llm_provider.generate(system_prompt, messages)
 
             spinner.stop()
+            verbose_echo(verbose, f"Response received. Tool calls: {len(response.tool_calls)}")
             if response.reasoning_content:
                 show_reasoning(response.reasoning_content)
             if response.message:
@@ -208,6 +241,7 @@ def main(provider, model, api_key, api_base, yes):
 
             # Check if LLM returned plain text without tool calls
             if not response.tool_calls:
+                verbose_echo(verbose, "No tool calls in response, requesting tool use")
                 messages.append({
                     "role": "user",
                     "content": "Please use the `message` tool to submit your commit message. Do not return plain text.",
@@ -215,6 +249,7 @@ def main(provider, model, api_key, api_base, yes):
                 continue
 
             tool_call_count += len(response.tool_calls)
+            verbose_echo(verbose, f"Total tool calls so far: {tool_call_count}/{max_tool_calls}")
 
             # Build tool results
             tool_results = []
@@ -293,6 +328,7 @@ def main(provider, model, api_key, api_base, yes):
                     click.echo(click.style(f"⚙️ Grep {args}", fg="bright_black"))
                     spinner.start()
                     result = grep_repo(repo, pattern, include)
+                    verbose_echo(verbose, f"Grep result length: {len(result)} characters")
                     tool_results.append(
                         ToolResult(
                             tool_call_id=tc["id"],
