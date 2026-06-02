@@ -193,7 +193,7 @@ def main(provider, model, api_key, api_base, yes):
             if response.reasoning_content:
                 show_reasoning(response.reasoning_content)
             if response.message:
-                click.echo(f"{response.message}\n")
+                click.echo(f"  {click.style('└─', fg='cyan')} {response.message}")
             spinner.start()
 
             # Check if LLM returned plain text without tool calls

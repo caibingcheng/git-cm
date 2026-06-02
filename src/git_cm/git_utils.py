@@ -25,7 +25,11 @@ def get_repo(path: Path) -> Repo:
 
 def has_staged_changes(repo: Repo) -> bool:
     """Check if there are staged changes in the repository."""
-    return len(repo.index.diff("HEAD")) > 0 or bool(repo.index.diff(None))
+    try:
+        return len(repo.index.diff("HEAD")) > 0 or bool(repo.index.diff(None))
+    except Exception:
+        # New repository without any commits (no HEAD)
+        return len(repo.index.entries) > 0
 
 
 def get_user_config(repo: Repo) -> dict:
