@@ -337,6 +337,15 @@ def main(provider, model, api_key, api_base, yes, verbose):
                         )
                     )
 
+                else:
+                    tool_results.append(
+                        ToolResult(
+                            tool_call_id=tc["id"],
+                            name=tc["name"],
+                            content=f"Error: Unknown tool '{tc['name']}'. Please use one of the available tools.",
+                        )
+                    )
+
             spinner.stop()
             click.echo()
             spinner.start()

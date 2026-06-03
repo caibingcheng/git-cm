@@ -544,6 +544,48 @@ class TestCLIWithStagedChanges:
                 finally:
                     os.chdir(old_cwd)
 
+    def test_unknown_tool_call(self, cli_runner, repo_with_changes, mock_config):
+        """Test LLM calls an unknown tool gets an error response."""
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            # First: unknown tool, Second: message tool
+            mock_provider.generate.side_effect = [
+                LLMResponse(
+                    tool_calls=[{
+                        "id": "call_1",
+                        "name": "unknown_tool",
+                        "arguments": {"foo": "bar"},
+                    }],
+                ),
+                message_tool_response("feat: valid message"),
+            ]
+            mock_create.return_value = mock_provider
+            
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+                
+                old_cwd = os.getcwd()
+                os.chdir(str(repo_with_changes))
+                try:
+                    result = cli_runner.invoke(main, ["--yes"])
+                    
+                    assert result.exit_code == 0
+                    assert "feat: valid message" in result.output
+                    assert "Committed:" in result.output
+                    assert mock_provider.generate.call_count == 2
+                    
+                    # Verify the error was passed back to LLM
+                    # generate(system_prompt, messages) uses positional args
+                    second_call_messages = mock_provider.generate.call_args_list[1][0][1]
+                    tool_result_msg = next(
+                        (m for m in second_call_messages if m.get("role") == "tool"),
+                        None,
+                    )
+                    assert tool_result_msg is not None
+                    assert "Error: Unknown tool 'unknown_tool'" in tool_result_msg["content"]
+                finally:
+                    os.chdir(old_cwd)
+
 
 class TestCLIErrors:
     """Test CLI error handling."""
