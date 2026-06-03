@@ -231,7 +231,7 @@ class TestCLIWithStagedChanges:
                 os.chdir(str(repo_with_changes))
                 try:
                     # Reject 4 times to reach max retries (3 retries = 4 rejections total)
-                    result = cli_runner.invoke(main, [], input="n\n\nn\n\nn\n\nn\n")
+                    result = cli_runner.invoke(main, [], input="n\nn\nn\nn\n")
                     
                     assert result.exit_code == 0
                     assert "Max retries reached" in result.output
@@ -253,7 +253,7 @@ class TestCLIWithStagedChanges:
                 os.chdir(str(repo_with_changes))
                 try:
                     # Reject 4 times to reach max retries (3 retries = 4 rejections total)
-                    result = cli_runner.invoke(main, [], input="n\n\nn\n\nn\n\nn\n")
+                    result = cli_runner.invoke(main, [], input="n\nn\nn\nn\n")
                     
                     assert result.exit_code == 0
                     assert "Max retries reached" in result.output
@@ -309,8 +309,8 @@ class TestCLIWithStagedChanges:
                 old_cwd = os.getcwd()
                 os.chdir(str(repo_with_changes))
                 try:
-                    # Input: n (reject), feedback, y (accept)
-                    result = cli_runner.invoke(main, [], input="n\nMake it more detailed\ny\n")
+                    # Input: feedback (reject), y (accept)
+                    result = cli_runner.invoke(main, [], input="Make it more detailed\ny\n")
                     
                     assert result.exit_code == 0
                     assert "feat: initial message" in result.output
@@ -336,8 +336,8 @@ class TestCLIWithStagedChanges:
                 old_cwd = os.getcwd()
                 os.chdir(str(repo_with_changes))
                 try:
-                    # Input: n (reject), Enter (empty feedback), y (accept)
-                    result = cli_runner.invoke(main, [], input="n\n\ny\n")
+                    # Input: n (reject with default feedback), y (accept)
+                    result = cli_runner.invoke(main, [], input="n\ny\n")
                     
                     assert result.exit_code == 0
                     assert "feat: retry message" in result.output
@@ -453,7 +453,7 @@ class TestCLIWithStagedChanges:
                     result = cli_runner.invoke(main, ["--yes"])
 
                     assert result.exit_code == 0
-                    assert "└─" in result.output
+                    assert "Response:" in result.output
                     assert "Let me check the files." in result.output
                     assert "feat: update test file" in result.output
                     assert "⚙️ Read" in result.output

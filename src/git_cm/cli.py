@@ -285,7 +285,13 @@ def main(provider, model, api_key, api_base, yes, verbose):
                         commit_changes(repo, message)
                         return
 
-                    if click.confirm("Do you want to commit with this message?", default=True):
+                    answer = click.prompt(
+                        "Accept? [Y/n/feedback]",
+                        default="Y",
+                        show_default=False,
+                    )
+                    answer = answer.strip()
+                    if answer.lower() in ("y", ""):
                         commit_changes(repo, message)
                         return
                     else:
@@ -294,13 +300,10 @@ def main(provider, model, api_key, api_base, yes, verbose):
                             click.echo("Max retries reached. Commit cancelled.")
                             return
 
-                        feedback = click.prompt(
-                            "Why don't you like this message? (Press Enter to skip)",
-                            default="",
-                            show_default=False,
-                        )
-                        if not feedback.strip():
+                        if answer.lower() == "n":
                             feedback = "I refuse current commit message"
+                        else:
+                            feedback = answer
 
                         tool_results.append(
                             ToolResult(
