@@ -33,3 +33,7 @@ Tests run against `src/` via `pythonpath = ["src"]` in `pyproject.toml`.
 ## Conventions
 
 - Commit messages in this repo use **Conventional Commits** (`feat:`, `fix:`, etc.)
+
+## Maintenance
+
+- When code configuration or usage patterns change, review both `README.md` and `AGENTS.md` to check if updates are needed.
