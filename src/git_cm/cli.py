@@ -123,9 +123,6 @@ def main(provider, model, api_key, api_base, yes, verbose):
     user_name = user_config["name"]
     user_email = user_config["email"]
 
-    click.echo(
-        f"Using provider: {config.active_provider_name} ({config.model})"
-    )
     click.echo(f"Git user: {user_name} <{user_email}>")
     verbose_echo(verbose, f"Working directory: {current_dir}")
     verbose_echo(verbose, f"Repo path: {repo.working_tree_dir}")
@@ -221,6 +218,10 @@ def main(provider, model, api_key, api_base, yes, verbose):
     tool_call_count = 0
     retry_count = 0
     max_retries = 3
+
+    click.echo(
+        click.style(f"Using provider: {config.active_provider_name} ({config.model})", fg="bright_black")
+    )
 
     click.echo()
     spinner = Spinner(text="Thinking...")
