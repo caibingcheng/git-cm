@@ -27,7 +27,7 @@ from git_cm.git_utils import (
     is_git_repo,
     read_files_batch,
 )
-from git_cm.llm import ToolResult, create_provider
+from git_cm.llm import LLMProvider, LLMResponse, ToolResult, create_provider, StreamChunk
 from git_cm.prompt import build_prompt, chunk_diff
 
 
@@ -84,6 +84,27 @@ def verbose_echo(enabled: bool, message: str, **kwargs) -> None:
     """Print message only when verbose mode is enabled."""
     if enabled:
         click.echo(click.style("[verbose] ", fg="magenta") + message, **kwargs)
+
+
+def _fallback_stream(response):
+    """Simulate a stream from a non-streaming response (for test mocks)."""
+    if response.reasoning_content:
+        yield StreamChunk(type="reasoning_delta", reasoning_delta=response.reasoning_content)
+    if response.message:
+        yield StreamChunk(type="text_delta", text_delta=response.message)
+    if response.tool_calls:
+        yield StreamChunk(
+            type="tool_calls",
+            tool_calls=response.tool_calls,
+            usage=response.usage,
+            context_window=response.context_window,
+        )
+    else:
+        yield StreamChunk(
+            type="done",
+            usage=response.usage,
+            context_window=response.context_window,
+        )
 
 
 @click.command()
@@ -283,14 +304,75 @@ def main(provider, model, api_key, api_base, yes, verbose):
             if verbose and messages:
                 verbose_echo(verbose, f"Messages count: {len(messages)}")
 
-            response = llm_provider.generate(system_prompt, messages)
+            accumulated_reasoning = ""
+            accumulated_message = ""
+            tool_calls = None
+            usage = None
+            context_window = None
+            has_reasoning = False
+            has_message = False
 
-            spinner.stop()
+            # Use streaming for real providers, fallback for mocks in tests
+            if isinstance(llm_provider, LLMProvider):
+                stream = llm_provider.generate_stream(system_prompt, messages)
+            else:
+                # Fallback for test mocks: call generate() and simulate stream
+                response = llm_provider.generate(system_prompt, messages)
+                stream = _fallback_stream(response)
+
+            for chunk in stream:
+                spinner.stop()
+                if chunk.type == "reasoning_delta":
+                    if not has_reasoning:
+                        click.echo(click.style("Thought: ", fg="cyan"), nl=False)
+                        has_reasoning = True
+                    for char in chunk.reasoning_delta:
+                        click.echo(click.style(char, fg="bright_black"), nl=False)
+                        sys.stdout.flush()
+                        time.sleep(0.001)
+                    accumulated_reasoning += chunk.reasoning_delta
+                elif chunk.type == "text_delta":
+                    if not has_message:
+                        if has_reasoning:
+                            click.echo()
+                        click.echo(click.style("Response: ", fg="cyan"), nl=False)
+                        has_message = True
+                    for char in chunk.text_delta:
+                        click.echo(click.style(char, fg="bright_black"), nl=False)
+                        sys.stdout.flush()
+                        time.sleep(0.001)
+                    accumulated_message += chunk.text_delta
+                elif chunk.type == "tool_calls":
+                    tool_calls = chunk.tool_calls
+                    usage = chunk.usage
+                    context_window = chunk.context_window
+                    break
+                elif chunk.type == "done":
+                    usage = chunk.usage
+                    context_window = chunk.context_window
+                    break
+
+            if has_reasoning or has_message:
+                click.echo()
+
+            # Show usage percentage
+            if usage and context_window:
+                total_tokens = usage.get("total_tokens", 0)
+                if total_tokens > 0 and context_window > 0:
+                    percentage = (total_tokens / context_window) * 100
+                    click.echo(click.style(f" [{percentage:.1f}%]", fg="yellow"))
+
+            # Construct LLMResponse from streamed data
+            response = LLMResponse(
+                message=accumulated_message,
+                tool_calls=tool_calls or [],
+                is_done=not tool_calls,
+                reasoning_content=accumulated_reasoning or None,
+                usage=usage or {},
+                context_window=context_window,
+            )
+
             verbose_echo(verbose, f"Response received. Tool calls: {len(response.tool_calls)}")
-            if response.reasoning_content:
-                show_reasoning(response.reasoning_content, response.usage, response.context_window)
-            if response.message:
-                click.echo(click.style("Response: ", fg="cyan") + click.style(f"{response.message}\n", fg="bright_black"))
             spinner.start()
 
             # Check if LLM returned plain text without tool calls

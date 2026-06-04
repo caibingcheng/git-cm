@@ -112,6 +112,157 @@ class TestOpenAIProvider:
             assert result.message == "fix: resolve bug"
             assert result.reasoning_content is None
 
+    def test_openai_generate_stream_text_only(self):
+        """Test OpenAI stream with plain text response."""
+        with patch("openai.OpenAI") as mock_openai:
+            mock_client = MagicMock()
+            mock_openai.return_value = mock_client
+
+            # Simulate streaming chunks
+            def make_chunk(content):
+                chunk = MagicMock()
+                chunk.choices = [MagicMock()]
+                chunk.choices[0].delta = MagicMock()
+                chunk.choices[0].delta.content = content
+                chunk.choices[0].delta.reasoning_content = None
+                chunk.choices[0].delta.tool_calls = None
+                return chunk
+
+            # Final usage chunk (choices is empty)
+            usage_chunk = MagicMock()
+            usage_chunk.choices = []
+            usage_chunk.usage = MagicMock(
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+            )
+
+            mock_client.chat.completions.create.return_value = [
+                make_chunk("feat: "),
+                make_chunk("add "),
+                make_chunk("feature"),
+                usage_chunk,
+            ]
+
+            provider = OpenAIProvider("test-key", "gpt-4")
+            chunks = list(provider.generate_stream("system", [{"role": "user", "content": "test"}]))
+
+            assert len(chunks) == 4  # 3 text + 1 done
+            assert chunks[0].type == "text_delta"
+            assert chunks[0].text_delta == "feat: "
+            assert chunks[1].type == "text_delta"
+            assert chunks[1].text_delta == "add "
+            assert chunks[2].type == "text_delta"
+            assert chunks[2].text_delta == "feature"
+            assert chunks[3].type == "done"
+            assert chunks[3].usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    def test_openai_generate_stream_with_reasoning(self):
+        """Test OpenAI stream with reasoning content (DeepSeek)."""
+        with patch("openai.OpenAI") as mock_openai:
+            mock_client = MagicMock()
+            mock_openai.return_value = mock_client
+
+            def make_chunk(content, reasoning=None):
+                chunk = MagicMock()
+                chunk.choices = [MagicMock()]
+                chunk.choices[0].delta = MagicMock()
+                chunk.choices[0].delta.content = content
+                chunk.choices[0].delta.reasoning_content = reasoning
+                chunk.choices[0].delta.tool_calls = None
+                return chunk
+
+            usage_chunk = MagicMock()
+            usage_chunk.choices = []
+            usage_chunk.usage = None
+
+            mock_client.chat.completions.create.return_value = [
+                make_chunk(None, "Thinking..."),
+                make_chunk("feat: ", None),
+                make_chunk("fix bug", None),
+                usage_chunk,
+            ]
+
+            provider = OpenAIProvider("test-key", "gpt-4")
+            chunks = list(provider.generate_stream("system", [{"role": "user", "content": "test"}]))
+
+            assert len(chunks) == 4
+            assert chunks[0].type == "reasoning_delta"
+            assert chunks[0].reasoning_delta == "Thinking..."
+            assert chunks[1].type == "text_delta"
+            assert chunks[1].text_delta == "feat: "
+            assert chunks[2].type == "text_delta"
+            assert chunks[2].text_delta == "fix bug"
+            assert chunks[3].type == "done"
+
+    def test_openai_generate_stream_tool_call(self):
+        """Test OpenAI stream with tool call fragments."""
+        with patch("openai.OpenAI") as mock_openai:
+            mock_client = MagicMock()
+            mock_openai.return_value = mock_client
+
+            def make_text_chunk(content):
+                chunk = MagicMock()
+                chunk.choices = [MagicMock()]
+                chunk.choices[0].delta = MagicMock()
+                chunk.choices[0].delta.content = content
+                chunk.choices[0].delta.reasoning_content = None
+                chunk.choices[0].delta.tool_calls = None
+                return chunk
+
+            def make_tool_chunk(idx, tid=None, name=None, args=None):
+                chunk = MagicMock()
+                chunk.choices = [MagicMock()]
+                chunk.choices[0].delta = MagicMock()
+                chunk.choices[0].delta.content = None
+                chunk.choices[0].delta.reasoning_content = None
+
+                tc = MagicMock()
+                tc.index = idx
+                tc.id = tid or ""
+                tc.function = MagicMock()
+                tc.function.name = name or ""
+                tc.function.arguments = args or ""
+                chunk.choices[0].delta.tool_calls = [tc]
+                return chunk
+
+            usage_chunk = MagicMock()
+            usage_chunk.choices = []
+            usage_chunk.usage = None
+
+            mock_client.chat.completions.create.return_value = [
+                make_text_chunk("Let me "),
+                make_text_chunk("read the file."),
+                make_tool_chunk(0, tid="call_123", name="read_file"),
+                make_tool_chunk(0, args='{"path": "'),
+                make_tool_chunk(0, args='src/main.py"}'),
+                usage_chunk,
+            ]
+
+            provider = OpenAIProvider("test-key", "gpt-4")
+            chunks = list(provider.generate_stream("system", [{"role": "user", "content": "test"}]))
+
+            assert len(chunks) == 3  # 2 text + 1 tool_calls
+            assert chunks[0].type == "text_delta"
+            assert chunks[0].text_delta == "Let me "
+            assert chunks[1].type == "text_delta"
+            assert chunks[1].text_delta == "read the file."
+            assert chunks[2].type == "tool_calls"
+            assert len(chunks[2].tool_calls) == 1
+            assert chunks[2].tool_calls[0]["id"] == "call_123"
+            assert chunks[2].tool_calls[0]["name"] == "read_file"
+            assert chunks[2].tool_calls[0]["arguments"]["path"] == "src/main.py"
+
+    def test_provider_supports_streaming(self):
+        """Test that real providers declare streaming support."""
+        with patch("openai.OpenAI"):
+            openai_provider = OpenAIProvider("test-key", "gpt-4")
+            assert openai_provider.supports_streaming is True
+
+        # Base class does not support streaming
+        from git_cm.llm import LLMProvider
+        assert LLMProvider.supports_streaming is False
+
 
 class TestAnthropicProvider:
     """Test Anthropic provider."""
