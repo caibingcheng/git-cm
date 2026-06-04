@@ -2,6 +2,8 @@
 
 ## Development Setup
 
+Use `mise activate` to create and manage a virtual environment:
+
 ```bash
 pip install -e ".[dev]"
 ```

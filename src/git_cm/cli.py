@@ -27,7 +27,7 @@ from git_cm.git_utils import (
     read_files_batch,
 )
 from git_cm.llm import ToolResult, create_provider
-from git_cm.prompt import build_prompt
+from git_cm.prompt import build_prompt, chunk_diff
 
 
 
@@ -153,12 +153,31 @@ def main(provider, model, api_key, api_base, yes, verbose):
     # Analyze style
 
     # Get staged diff
-    diff = get_staged_diff(repo)
-    verbose_echo(verbose, f"Diff length: {len(diff)} characters")
+    full_diff = get_staged_diff(repo)
+    verbose_echo(verbose, f"Diff length: {len(full_diff)} characters")
 
-    if not diff.strip():
+    if not full_diff.strip():
         click.echo("Error: Could not retrieve staged diff.", err=True)
         raise click.ClickException("Failed to get staged diff")
+
+    # Warn user if diff is very large
+    if len(full_diff) > 100000:
+        click.echo(
+            click.style(
+                f"Warning: Staged diff is very large ({len(full_diff)} chars). "
+                "Consider splitting into smaller commits.",
+                fg="yellow",
+            )
+        )
+
+    # Split diff into chunks for incremental delivery
+    diff_chunks = chunk_diff(full_diff)
+    diff_chunk_idx = 0
+    has_more_diff = len(diff_chunks) > 1
+    verbose_echo(verbose, f"Diff split into {len(diff_chunks)} chunk(s)")
+    if verbose and len(diff_chunks) > 1:
+        for i, chunk in enumerate(diff_chunks):
+            verbose_echo(verbose, f"  Chunk {i}: {len(chunk)} chars")
 
     # Check for AGENTS.md
     agents_md_content = find_agents_md(repo)
@@ -180,12 +199,22 @@ def main(provider, model, api_key, api_base, yes, verbose):
     else:
         verbose_echo(verbose, "No current branch (new repo without commits)")
 
-    # Generate prompt
-    prompt = build_prompt(diff, recent_commits)
+    # Generate initial prompt with first diff chunk
+    prompt = build_prompt(
+        diff_chunks[0],
+        recent_commits,
+        has_more_diff=has_more_diff,
+        total_diff_length=len(full_diff),
+    )
     if current_branch:
         prompt = f"Current branch: {current_branch}\n\n" + prompt
 
     verbose_echo(verbose, f"User prompt length: {len(prompt)} characters")
+    if has_more_diff:
+        verbose_echo(
+            verbose,
+            f"Diff truncated in prompt: showing {len(diff_chunks[0])} of {len(full_diff)} chars"
+        )
     if verbose:
         click.echo(click.style("[verbose] System prompt:", fg="magenta"))
         click.echo("-" * 40)
@@ -343,6 +372,46 @@ def main(provider, model, api_key, api_base, yes, verbose):
                             content=result,
                         )
                     )
+
+                elif tc["name"] == "diff_more":
+                    spinner.stop()
+                    click.echo(click.style("⚙️ diff_more", fg="bright_black"))
+                    spinner.start()
+
+                    diff_chunk_idx += 1
+                    verbose_echo(
+                        verbose,
+                        f"diff_more requested chunk {diff_chunk_idx}/{len(diff_chunks)}"
+                    )
+                    if diff_chunk_idx < len(diff_chunks):
+                        chunk = diff_chunks[diff_chunk_idx]
+                        content = f"```diff\n{chunk}\n```"
+                        remaining = len(diff_chunks) - diff_chunk_idx - 1
+                        verbose_echo(
+                            verbose,
+                            f"Returning chunk {diff_chunk_idx} ({len(chunk)} chars), {remaining} remaining"
+                        )
+                        if remaining > 0:
+                            content += (
+                                f"\n[Note: more diff available ({len(full_diff)} total chars). "
+                                f"Use diff_more again to see additional changes.]"
+                            )
+                        tool_results.append(
+                            ToolResult(
+                                tool_call_id=tc["id"],
+                                name="diff_more",
+                                content=content,
+                            )
+                        )
+                    else:
+                        verbose_echo(verbose, "diff_more: no more chunks available")
+                        tool_results.append(
+                            ToolResult(
+                                tool_call_id=tc["id"],
+                                name="diff_more",
+                                content="No more diff content available.",
+                            )
+                        )
 
                 else:
                     tool_results.append(

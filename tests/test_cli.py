@@ -30,6 +30,19 @@ def cli_runner():
 
 
 @pytest.fixture
+def repo_with_changes(temp_git_repo):
+    """Create repo with staged changes."""
+    repo = Repo(temp_git_repo)
+
+    # Modify file and stage
+    test_file = temp_git_repo / "test.txt"
+    test_file.write_text("modified content")
+    repo.index.add([str(test_file)])
+
+    return temp_git_repo
+
+
+@pytest.fixture
 def temp_git_repo(tmp_path):
     """Create a temporary git repository for testing."""
     repo_path = tmp_path / "test-repo"
@@ -97,18 +110,6 @@ class TestCLIBasicChecks:
 
 class TestCLIWithStagedChanges:
     """Test CLI with staged changes."""
-
-    @pytest.fixture
-    def repo_with_changes(self, temp_git_repo):
-        """Create repo with staged changes."""
-        repo = Repo(temp_git_repo)
-        
-        # Modify file and stage
-        test_file = temp_git_repo / "test.txt"
-        test_file.write_text("modified content")
-        repo.index.add([str(test_file)])
-        
-        return temp_git_repo
 
     def test_shows_user_config(self, cli_runner, repo_with_changes, mock_config):
         """Test that user config is displayed."""
@@ -645,21 +646,144 @@ class TestCLIErrors:
         empty_file = temp_git_repo / "empty.txt"
         empty_file.write_text("")
         repo.index.add([str(empty_file)])
-        
+
         with patch("git_cm.cli.create_provider") as mock_create:
             mock_provider = MagicMock()
             mock_provider.generate.return_value = message_tool_response("feat: add empty file")
             mock_create.return_value = mock_provider
-            
+
             with patch("git_cm.cli.Config") as mock_config_class:
                 mock_config_class.return_value = mock_config
-                
+
                 old_cwd = os.getcwd()
                 os.chdir(str(temp_git_repo))
                 try:
                     result = cli_runner.invoke(main, ["--yes"])
-                    
+
                     # Empty file might still have a diff
                     assert result.exit_code in [0, 1]
+                finally:
+                    os.chdir(old_cwd)
+
+
+class TestDiffMore:
+    """Test diff_more tool functionality."""
+
+    def test_diff_more_returns_next_chunk(self, cli_runner, repo_with_changes, mock_config):
+        """Test diff_more returns the next chunk of diff."""
+        # Create a large diff that will be chunked
+        repo = Repo(repo_with_changes)
+        for i in range(2000):
+            (repo_with_changes / f"file_{i}.txt").write_text(f"content {i}\n")
+            repo.index.add([str(repo_with_changes / f"file_{i}.txt")])
+
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            # First call: diff_more tool, Second call: message tool
+            mock_provider.generate.side_effect = [
+                LLMResponse(
+                    tool_calls=[{
+                        "id": "call_1",
+                        "name": "diff_more",
+                        "arguments": {},
+                    }],
+                ),
+                message_tool_response("feat: add many files"),
+            ]
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                old_cwd = os.getcwd()
+                os.chdir(str(repo_with_changes))
+                try:
+                    result = cli_runner.invoke(main, ["--yes"])
+
+                    assert result.exit_code == 0
+                    assert "feat: add many files" in result.output
+                    assert "Committed:" in result.output
+                    assert mock_provider.generate.call_count == 2
+
+                    # Verify the diff_more result was passed to LLM
+                    second_call_messages = mock_provider.generate.call_args_list[1][0][1]
+                    tool_result_msg = next(
+                        (m for m in second_call_messages if m.get("role") == "tool"),
+                        None,
+                    )
+                    assert tool_result_msg is not None
+                    assert "```diff" in tool_result_msg["content"]
+                finally:
+                    os.chdir(old_cwd)
+
+    def test_diff_more_exhausted(self, cli_runner, repo_with_changes, mock_config):
+        """Test diff_more when no more content is available."""
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            # First call: diff_more tool (too many times), Second call: message tool
+            mock_provider.generate.side_effect = [
+                LLMResponse(
+                    tool_calls=[{
+                        "id": "call_1",
+                        "name": "diff_more",
+                        "arguments": {},
+                    }],
+                ),
+                LLMResponse(
+                    tool_calls=[{
+                        "id": "call_2",
+                        "name": "diff_more",
+                        "arguments": {},
+                    }],
+                ),
+                message_tool_response("feat: test commit"),
+            ]
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                old_cwd = os.getcwd()
+                os.chdir(str(repo_with_changes))
+                try:
+                    result = cli_runner.invoke(main, ["--yes"])
+
+                    assert result.exit_code == 0
+                    assert "feat: test commit" in result.output
+                    # Third call should get "No more diff content available"
+                    third_call_messages = mock_provider.generate.call_args_list[2][0][1]
+                    tool_result_msg = next(
+                        (m for m in third_call_messages if m.get("role") == "tool"),
+                        None,
+                    )
+                    assert tool_result_msg is not None
+                    assert "No more diff content available" in tool_result_msg["content"]
+                finally:
+                    os.chdir(old_cwd)
+
+    def test_large_diff_warning(self, cli_runner, repo_with_changes, mock_config):
+        """Test warning for very large diffs (>100000 chars)."""
+        # Create a very large diff
+        repo = Repo(repo_with_changes)
+        large_content = "x" * 200000
+        (repo_with_changes / "large_file.txt").write_text(large_content)
+        repo.index.add([str(repo_with_changes / "large_file.txt")])
+
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.generate.return_value = message_tool_response("feat: add large file")
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                old_cwd = os.getcwd()
+                os.chdir(str(repo_with_changes))
+                try:
+                    result = cli_runner.invoke(main, ["--yes"])
+
+                    assert result.exit_code == 0
+                    assert "Warning: Staged diff is very large" in result.output
+                    assert "Consider splitting into smaller commits" in result.output
                 finally:
                     os.chdir(old_cwd)

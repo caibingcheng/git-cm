@@ -56,6 +56,19 @@ GREP_TOOL_SCHEMA = {
     },
 }
 
+DIFF_MORE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "diff_more",
+        "description": "Get additional diff content that was truncated. Call this when the diff shown in the prompt was truncated and you need to see more changes to understand the full scope.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
 MESSAGE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -74,7 +87,7 @@ MESSAGE_TOOL_SCHEMA = {
     },
 }
 
-TOOLS = [READ_FILE_TOOL_SCHEMA, GREP_TOOL_SCHEMA, MESSAGE_TOOL_SCHEMA]
+TOOLS = [READ_FILE_TOOL_SCHEMA, GREP_TOOL_SCHEMA, DIFF_MORE_TOOL_SCHEMA, MESSAGE_TOOL_SCHEMA]
 
 
 class ToolResult:
