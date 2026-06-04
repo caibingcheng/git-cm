@@ -108,11 +108,15 @@ class LLMResponse:
         tool_calls: Optional[List[Dict]] = None,
         is_done: bool = False,
         reasoning_content: Optional[str] = None,
+        usage: Optional[Dict[str, int]] = None,
+        context_window: Optional[int] = None,
     ):
         self.message = message
         self.tool_calls = tool_calls or []
         self.is_done = is_done
         self.reasoning_content = reasoning_content
+        self.usage = usage or {}
+        self.context_window = context_window
 
 
 class LLMProvider(ABC):
@@ -124,6 +128,26 @@ class LLMProvider(ABC):
         self.api_base = api_base
 
     @abstractmethod
+    def _get_context_window(self) -> Optional[int]:
+        """Try to fetch context window from API, fallback to manual config."""
+        if self._fetched_context_window is not None:
+            return self._fetched_context_window
+        
+        # Try automatic fetch first
+        try:
+            model_info = self.client.models.retrieve(self.model)
+            if hasattr(model_info, 'context_window'):
+                self._fetched_context_window = model_info.context_window
+                return self._fetched_context_window
+        except Exception:
+            pass  # API might not support this or key lacks permission
+        
+        # Fallback to manual config
+        if self._context_window is not None:
+            return self._context_window
+        
+        return None
+
     def generate(self, system_prompt: str, messages: List[Dict]) -> LLMResponse:
         """Generate response with possible tool calls."""
         pass
@@ -134,7 +158,7 @@ class LLMProvider(ABC):
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible API provider with tool calling."""
 
-    def __init__(self, api_key: str, model: str, api_base: Optional[str] = None):
+    def __init__(self, api_key: str, model: str, api_base: Optional[str] = None, context_window: Optional[int] = None):
         super().__init__(api_key, model, api_base)
         try:
             from openai import OpenAI
@@ -149,6 +173,28 @@ class OpenAIProvider(LLMProvider):
             client_kwargs["base_url"] = api_base
 
         self.client = OpenAI(**client_kwargs)
+        self._context_window = context_window
+        self._fetched_context_window = None
+
+    def _get_context_window(self) -> Optional[int]:
+        """Try to fetch context window from API, fallback to manual config."""
+        if self._fetched_context_window is not None:
+            return self._fetched_context_window
+        
+        # Try automatic fetch first
+        try:
+            model_info = self.client.models.retrieve(self.model)
+            if hasattr(model_info, 'context_window'):
+                self._fetched_context_window = model_info.context_window
+                return self._fetched_context_window
+        except Exception:
+            pass  # API might not support this or key lacks permission
+        
+        # Fallback to manual config
+        if self._context_window is not None:
+            return self._context_window
+        
+        return None
 
     def generate(self, system_prompt: str, messages: List[Dict]) -> LLMResponse:
         """Generate response using OpenAI API with tool support."""
@@ -174,17 +220,37 @@ class OpenAIProvider(LLMProvider):
                         "name": tc.function.name,
                         "arguments": json.loads(tc.function.arguments),
                     })
+                usage = {}
+                if hasattr(response, 'usage') and response.usage:
+                    usage = {
+                        "prompt_tokens": getattr(response.usage, 'prompt_tokens', 0),
+                        "completion_tokens": getattr(response.usage, 'completion_tokens', 0),
+                        "total_tokens": getattr(response.usage, 'total_tokens', 0),
+                    }
+                
                 return LLMResponse(
                     message=message.content or "",
                     tool_calls=tool_calls,
                     reasoning_content=reasoning,
+                    usage=usage,
+                    context_window=self._get_context_window(),
                 )
 
             # No tool calls - this is the final answer
+            usage = {}
+            if hasattr(response, 'usage') and response.usage:
+                usage = {
+                    "prompt_tokens": getattr(response.usage, 'prompt_tokens', 0),
+                    "completion_tokens": getattr(response.usage, 'completion_tokens', 0),
+                    "total_tokens": getattr(response.usage, 'total_tokens', 0),
+                }
+            
             return LLMResponse(
                 message=message.content.strip() if message.content else "",
                 is_done=True,
                 reasoning_content=reasoning,
+                usage=usage,
+                context_window=self._get_context_window(),
             )
 
         except Exception as e:
@@ -195,7 +261,7 @@ class OpenAIProvider(LLMProvider):
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude API provider with tool calling."""
 
-    def __init__(self, api_key: str, model: str, api_base: Optional[str] = None):
+    def __init__(self, api_key: str, model: str, api_base: Optional[str] = None, context_window: Optional[int] = None):
         super().__init__(api_key, model, api_base)
         try:
             from anthropic import Anthropic
@@ -210,6 +276,27 @@ class AnthropicProvider(LLMProvider):
             client_kwargs["base_url"] = api_base
 
         self.client = Anthropic(**client_kwargs)
+        self._context_window = context_window
+
+    def _get_context_window(self) -> Optional[int]:
+        """Try to fetch context window from API, fallback to manual config."""
+        if self._fetched_context_window is not None:
+            return self._fetched_context_window
+        
+        # Try automatic fetch first
+        try:
+            model_info = self.client.models.retrieve(self.model)
+            if hasattr(model_info, 'context_window'):
+                self._fetched_context_window = model_info.context_window
+                return self._fetched_context_window
+        except Exception:
+            pass  # API might not support this or key lacks permission
+        
+        # Fallback to manual config
+        if self._context_window is not None:
+            return self._context_window
+        
+        return None
 
     def generate(self, system_prompt: str, messages: List[Dict]) -> LLMResponse:
         """Generate response using Anthropic API with tool support."""
@@ -276,16 +363,28 @@ class AnthropicProvider(LLMProvider):
                     # Anthropic thinking block (reasoning)
                     reasoning += getattr(block, "thinking", "")
 
+            usage = {}
+            if hasattr(response, 'usage') and response.usage:
+                usage = {
+                    "prompt_tokens": getattr(response.usage, 'input_tokens', 0),
+                    "completion_tokens": getattr(response.usage, 'output_tokens', 0),
+                    "total_tokens": getattr(response.usage, 'input_tokens', 0) + getattr(response.usage, 'output_tokens', 0),
+                }
+            
             if tool_calls:
                 return LLMResponse(
                     tool_calls=tool_calls,
                     reasoning_content=reasoning if reasoning else None,
+                    usage=usage,
+                    context_window=self._context_window,
                 )
 
             return LLMResponse(
                 message=final_text.strip(),
                 is_done=True,
                 reasoning_content=reasoning if reasoning else None,
+                usage=usage,
+                context_window=self._context_window,
             )
 
         except Exception as e:
@@ -293,13 +392,13 @@ class AnthropicProvider(LLMProvider):
             raise click.ClickException(f"LLM API error: {e}")
 
 
-def create_provider(provider_type: str, api_key: str, model: str, api_base: Optional[str] = None) -> LLMProvider:
+def create_provider(provider_type: str, api_key: str, model: str, api_base: Optional[str] = None, context_window: Optional[int] = None) -> LLMProvider:
     """Factory function to create the appropriate LLM provider."""
     provider_type = provider_type.lower()
 
     if provider_type == "openai":
-        return OpenAIProvider(api_key, model, api_base)
+        return OpenAIProvider(api_key, model, api_base, context_window)
     elif provider_type == "anthropic":
-        return AnthropicProvider(api_key, model, api_base)
+        return AnthropicProvider(api_key, model, api_base, context_window)
     else:
         raise ValueError(f"Unsupported provider: {provider_type}. Use 'openai' or 'anthropic'.")

@@ -13,11 +13,13 @@ class TestBuildPrompt:
 
         prompt = build_prompt(diff, commits)
 
-        assert "Recent commit history:" in prompt
+        assert "<recent_commits>" in prompt
+        assert "<commit index=\"1\"\u003e" in prompt
         assert "feat: add feature" in prompt
-        assert "```diff" in prompt
+        assert "</diff>" in prompt
+        assert "<![CDATA[" in prompt
         assert "new line" in prompt
-        assert "```" in prompt
+        assert "]]\u003e" in prompt
 
     def test_prompt_with_multiple_commits(self):
         """Test prompt with multiple recent commits."""
@@ -42,10 +44,9 @@ class TestBuildPrompt:
 
         prompt = build_prompt(diff, commits)
 
-        # Should only include first 5 (each commit wrapped in ---)
-        separator_count = prompt.count("---")
-        # 5 commits = 5 opening --- + 1 closing --- = 6
-        assert separator_count == 11
+        # Should only include first 5
+        commit_count = prompt.count("<commit ")
+        assert commit_count == 5
 
     def test_prompt_multiline_commits(self):
         """Test that multiline commits include full message body."""
@@ -70,8 +71,8 @@ class TestBuildPrompt:
 
         prompt = build_prompt(diff, commits)
 
-        assert "```diff" in prompt
-        assert "Please generate a commit message" in prompt
+        assert "<diff>" in prompt
+        assert "<![CDATA[" in prompt
 
     def test_empty_commits(self):
         """Test prompt with no commits."""
@@ -81,10 +82,10 @@ class TestBuildPrompt:
         prompt = build_prompt(diff, commits)
 
         # Should still work without commit history
-        assert "Please generate a commit message" in prompt
-        assert "```diff" in prompt
-        # Should not have "Recent commit history" section
-        assert "Recent commit history:" not in prompt
+        assert "<diff>" in prompt
+        assert "<![CDATA[" in prompt
+        # Should not have commit tags
+        assert "<commit " not in prompt
         # Should have new repo note
         assert "new repository" in prompt.lower()
         assert "Conventional Commits" in prompt
@@ -108,6 +109,37 @@ class TestBuildPrompt:
         prompt = build_prompt(diff, commits, has_more_diff=False)
 
         assert "diff truncated" not in prompt
+
+    def test_files_info(self):
+        """Test that files section is included when files_info is provided."""
+        diff = "+change"
+        commits = []
+        files_info = [
+            {"path": "src/main.py", "status": "modified", "is_binary": "false"},
+            {"path": "assets/logo.png", "status": "added", "is_binary": "true"},
+        ]
+
+        prompt = build_prompt(diff, commits, files_info=files_info)
+
+        assert "<files>" in prompt
+        assert 'path="src/main.py"' in prompt
+        assert 'status="modified"' in prompt
+        assert 'type="text"' in prompt
+        assert 'path="assets/logo.png"' in prompt
+        assert 'status="added"' in prompt
+        assert 'type="binary"' in prompt
+        assert "</files>" in prompt
+
+    def test_no_files_info(self):
+        """Test that files section shows placeholder when no files_info."""
+        diff = "+change"
+        commits = []
+
+        prompt = build_prompt(diff, commits)
+
+        assert "<files>" in prompt
+        assert "No file information available" in prompt
+        assert "</files>" in prompt
 
 
 class TestChunkDiff:
@@ -163,7 +195,7 @@ class TestBuildRetryPrompt:
     """Test retry prompt building."""
 
     def test_build_retry_prompt_includes_feedback(self):
-        """Test that retry prompt includes feedback text."""
+        """Test that retry prompt includes feedback text in XML format."""
         original = "Original prompt"
         previous = "feat: old message"
         feedback = "Make it more detailed"
@@ -171,9 +203,11 @@ class TestBuildRetryPrompt:
         result = build_retry_prompt(original, previous, feedback)
 
         assert original in result
-        assert "Previous attempt:" in result
+        assert "<retry>" in result
+        assert "<previous_attempt>" in result
         assert previous in result
-        assert f"User feedback: {feedback}" in result
+        assert "<feedback>" in result
+        assert feedback in result
         assert "Please generate a new commit message" in result
 
     def test_build_retry_prompt_default_feedback(self):
@@ -184,4 +218,6 @@ class TestBuildRetryPrompt:
 
         result = build_retry_prompt(original, previous, feedback)
 
-        assert f"User feedback: {feedback}" in result
+        assert "<retry>" in result
+        assert feedback in result
+        assert "</feedback>" in result

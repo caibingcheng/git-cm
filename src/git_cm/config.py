@@ -175,6 +175,8 @@ class Config:
                 "model": active_provider.get("model", ""),
                 "system_prompt": active_provider.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
             }
+            if active_provider.get("context_window") is not None:
+                self._data["context_window"] = active_provider["context_window"]
 
         # Environment variable overrides (legacy, for backward compatibility)
         env_mapping = {
@@ -230,11 +232,11 @@ class Config:
         # Also update the active provider in providers list
         if self._active_provider_name:
             provider = self._get_provider_by_name(self._active_provider_name)
-            if provider and key in ["provider", "api_key", "api_base", "model", "system_prompt"]:
+            if provider and key in ["provider", "api_key", "api_base", "model", "system_prompt", "context_window"]:
                 # Map flat key to provider key
                 provider_key = "provider_type" if key == "provider" else key
                 provider[provider_key] = value
-        elif key in ["provider", "api_key", "api_base", "model", "system_prompt"]:
+        elif key in ["provider", "api_key", "api_base", "model", "system_prompt", "context_window"]:
             # No active provider yet, create one
             provider_name = "default"
             provider_type = self._data.get("provider", DEFAULT_PROVIDER_TYPE) if key != "provider" else value
@@ -283,6 +285,10 @@ class Config:
     def system_prompt(self) -> str:
         return self._data.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
 
+    @property
+    def context_window(self) -> Optional[int]:
+        return self._data.get("context_window", None)
+
     # Multi-provider management methods
     
     @property
@@ -301,7 +307,8 @@ class Config:
         return self._default_provider_name
 
     def add_provider(self, name: str, provider_type: str, api_key: str, model: str,
-                     api_base: str = "", system_prompt: str = "", set_default: bool = False) -> None:
+                     api_base: str = "", system_prompt: str = "", context_window: Optional[int] = None,
+                     set_default: bool = False) -> None:
         """Add a new provider configuration."""
         # Check if name already exists
         if self._get_provider_by_name(name):
@@ -315,6 +322,8 @@ class Config:
             "model": model,
             "system_prompt": system_prompt or DEFAULT_SYSTEM_PROMPT,
         }
+        if context_window is not None:
+            provider["context_window"] = context_window
         self._providers.append(provider)
         
         if set_default or not self._default_provider_name:

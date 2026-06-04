@@ -1,6 +1,6 @@
 """Prompt generation for LLM commit message generation."""
 
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 MAX_DIFF_CHUNK_SIZE = 32000
 
@@ -38,18 +38,29 @@ def chunk_diff(diff: str, chunk_size: int = MAX_DIFF_CHUNK_SIZE) -> List[str]:
     return chunks
 
 
+def _escape_xml(text: str) -> str:
+    """Escape XML special characters."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 def build_retry_prompt(original_prompt: str, previous_message: str, feedback: str) -> str:
-    """Build a retry prompt with user feedback."""
+    """Build a retry prompt with user feedback in XML format."""
     lines = [
-        original_prompt,
+        "<retry>",
+        "<previous_attempt>",
+        _escape_xml(previous_message),
+        "</previous_attempt>",
         "",
-        "---",
-        "Previous attempt:",
-        previous_message,
+        "<feedback>",
+        _escape_xml(feedback),
+        "</feedback>",
         "",
-        f"User feedback: {feedback}",
-        "",
+        "<instruction>",
         "Please generate a new commit message based on the feedback.",
+        "</instruction>",
+        "</retry>",
+        "",
+        original_prompt,
     ]
     return "\n".join(lines)
 
@@ -57,44 +68,59 @@ def build_retry_prompt(original_prompt: str, previous_message: str, feedback: st
 def build_prompt(
     diff: str,
     recent_commits: List[str],
+    files_info: Optional[List[Dict[str, str]]] = None,
     has_more_diff: bool = False,
     total_diff_length: int = 0,
 ) -> str:
-    """Build the user prompt for LLM commit message generation.
+    """Build the user prompt for LLM commit message generation in XML format.
 
     Args:
         diff: The staged diff text (may be a chunk if truncated)
         recent_commits: List of recent commit messages
+        files_info: List of dicts with file info (path, status, is_binary)
         has_more_diff: Whether additional diff content is available
         total_diff_length: Total length of the original diff
 
     Returns:
-        A formatted prompt string for the LLM
+        A formatted XML prompt string for the LLM
     """
     lines = []
 
-    # Add recent commit history section (full messages for style analysis)
+    # Add recent commit history section
+    lines.append("<recent_commits>")
     if recent_commits:
-        lines.append("Recent commit history:")
         for i, commit in enumerate(recent_commits[:5]):  # Limit to 5
-            # Include full commit message (subject + body) for style analysis
-            # Truncate if too long to avoid exceeding token limits
+            # Truncate if too long
             max_commit_len = 500
             if len(commit) > max_commit_len:
                 commit = commit[:max_commit_len] + "\n[... truncated]"
-            lines.append(f"---history {i}---")
-            lines.append(commit)
-        lines.append("---")
-        lines.append("")
+            lines.append(f"  <commit index=\"{i + 1}\">")
+            lines.append(f"    {_escape_xml(commit)}")
+            lines.append(f"  </commit>")
     else:
-        lines.append("Note: This is a new repository with no commit history yet.")
-        lines.append("Please use Conventional Commits style for the first commit.")
-        lines.append("")
+        lines.append("  <note>")
+        lines.append("    This is a new repository with no commit history yet.")
+        lines.append("    Please use Conventional Commits style for the first commit.")
+        lines.append("  </note>")
+    lines.append("</recent_commits>")
+    lines.append("")
+
+    # Add files section
+    lines.append("<files>")
+    if files_info:
+        for file_info in files_info:
+            path = file_info.get("path", "")
+            status = file_info.get("status", "modified")
+            file_type = "binary" if file_info.get("is_binary") == "true" else "text"
+            lines.append(f'  <file path="{path}" status="{status}" type="{file_type}" />')
+    else:
+        lines.append("  <!-- No file information available -->")
+    lines.append("</files>")
+    lines.append("")
 
     # Add the diff
-    lines.append("Please generate a commit message for the following changes:")
-    lines.append("")
-    lines.append("```diff")
+    lines.append("<diff>")
+    lines.append("<![CDATA[")
     lines.append(diff)
     if has_more_diff:
         shown = len(diff)
@@ -102,6 +128,7 @@ def build_prompt(
             f"\n[Note: diff truncated. Showing first {shown} of "
             f"{total_diff_length} total chars. Use diff_more tool to see additional changes.]"
         )
-    lines.append("```")
+    lines.append("]]>")
+    lines.append("</diff>")
 
     return "\n".join(lines)

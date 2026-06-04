@@ -20,6 +20,7 @@ from git_cm.git_utils import (
     get_recent_commits,
     get_repo,
     get_staged_diff,
+    get_staged_files,
     get_user_config,
     grep_repo,
     has_staged_changes,
@@ -64,9 +65,19 @@ class Spinner:
             self.thread.join()
 
 
-def show_reasoning(content: str) -> None:
-    """Display reasoning content in terminal."""
-    click.echo(click.style("Thought: ", fg="cyan") + click.style(f"{content}\n", fg="bright_black"))
+def show_reasoning(content: str, usage: dict = None, context_window: int = None) -> None:
+    """Display reasoning content in terminal with optional token usage percentage."""
+    prefix = click.style("Thought: ", fg="cyan")
+    
+    # Calculate token usage percentage if available
+    usage_text = ""
+    if usage and context_window:
+        total_tokens = usage.get("total_tokens", 0)
+        if total_tokens > 0 and context_window > 0:
+            percentage = (total_tokens / context_window) * 100
+            usage_text = click.style(f" [{percentage:.1f}%]", fg="yellow")
+    
+    click.echo(prefix + click.style(f"{content}", fg="bright_black") + usage_text + "\n")
 
 
 def verbose_echo(enabled: bool, message: str, **kwargs) -> None:
@@ -152,7 +163,15 @@ def main(provider, model, api_key, api_base, yes, verbose):
 
     # Analyze style
 
-    # Get staged diff
+    # Get staged files and diff
+    staged_files = get_staged_files(repo)
+    if staged_files:
+        click.echo(f"Found {len(staged_files)} staged file(s)")
+        if verbose:
+            for f in staged_files:
+                file_type = "binary" if f["is_binary"] == "true" else "text"
+                verbose_echo(verbose, f"  {f['status']:10} {f['path']} ({file_type})")
+    
     full_diff = get_staged_diff(repo)
     verbose_echo(verbose, f"Diff length: {len(full_diff)} characters")
 
@@ -203,6 +222,7 @@ def main(provider, model, api_key, api_base, yes, verbose):
     prompt = build_prompt(
         diff_chunks[0],
         recent_commits,
+        files_info=staged_files,
         has_more_diff=has_more_diff,
         total_diff_length=len(full_diff),
     )
@@ -232,6 +252,7 @@ def main(provider, model, api_key, api_base, yes, verbose):
             config.api_key,
             config.model,
             config.api_base or None,
+            config.context_window,
         )
     except Exception as e:
         click.echo(f"Error creating LLM provider: {e}", err=True)
@@ -267,7 +288,7 @@ def main(provider, model, api_key, api_base, yes, verbose):
             spinner.stop()
             verbose_echo(verbose, f"Response received. Tool calls: {len(response.tool_calls)}")
             if response.reasoning_content:
-                show_reasoning(response.reasoning_content)
+                show_reasoning(response.reasoning_content, response.usage, response.context_window)
             if response.message:
                 click.echo(click.style("Response: ", fg="cyan") + click.style(f"{response.message}\n", fg="bright_black"))
             spinner.start()

@@ -79,12 +79,100 @@ def check_user_in_history(repo: Repo, name: str, email: str) -> bool:
     except Exception:
         return False
 
+def get_staged_files(repo: Repo) -> List[Dict[str, str]]:
+    """Get list of staged files with their status and binary detection.
+    
+    Returns:
+        List of dicts with keys: path, status, is_binary
+        status: 'added', 'modified', 'deleted', 'renamed'
+        is_binary: 'true' or 'false'
+    """
+    files = []
+    
+    try:
+        # Get file statuses
+        status_output = repo.git.diff("--cached", "--name-status")
+        
+        # Get binary detection (binary files show as "- -" in numstat)
+        numstat_output = repo.git.diff("--cached", "--numstat")
+        
+        # Parse binary files
+        binary_files = set()
+        for line in numstat_output.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] == "-" and parts[1] == "-":
+                binary_files.add(parts[2])
+        
+        # Parse status
+        for line in status_output.strip().splitlines():
+            if not line.strip():
+                continue
+            
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            
+            status_code = parts[0]
+            path = parts[1]
+            
+            # Map status code
+            if status_code == "A":
+                status = "added"
+            elif status_code == "M":
+                status = "modified"
+            elif status_code == "D":
+                status = "deleted"
+            elif status_code.startswith("R"):
+                status = "renamed"
+                # For renamed, path is the destination
+                if len(parts) >= 3:
+                    path = parts[2]
+            else:
+                status = "modified"
+            
+            is_binary = "true" if path in binary_files else "false"
+            
+            files.append({
+                "path": path,
+                "status": status,
+                "is_binary": is_binary,
+            })
+    except Exception as e:
+        click.echo(f"Warning: Failed to get staged files: {e}", err=True)
+    
+    return files
 
 def get_staged_diff(repo: Repo) -> str:
-    """Get the diff of staged changes."""
+    """Get the diff of staged changes with improved binary file handling."""
     try:
         diff = repo.git.diff("--cached")
-        return diff
+        
+        # Enhance binary file descriptions
+        # Replace generic "Binary files differ" with explicit file paths
+        lines = diff.split("\n")
+        result_lines = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if "Binary files differ" in line:
+                # Try to extract file path from previous diff header line
+                file_path = None
+                for j in range(len(result_lines) - 1, -1, -1):
+                    if result_lines[j].startswith("diff --git "):
+                        parts = result_lines[j].split(" ")
+                        if len(parts) >= 4:
+                            # b/path/to/file
+                            file_path = parts[3][2:] if parts[3].startswith("b/") else parts[3]
+                        break
+                if file_path:
+                    result_lines.append(f"[Binary file: {file_path}]")
+                else:
+                    result_lines.append(line)
+            else:
+                result_lines.append(line)
+            i += 1
+        
+        return "\n".join(result_lines)
     except Exception as e:
         click.echo(f"Warning: Failed to get staged diff: {e}", err=True)
         return ""
