@@ -246,8 +246,11 @@ class Config:
                 "api_key": self._data.get("api_key", ""),
                 "api_base": self._data.get("api_base", ""),
                 "model": self._data.get("model", ""),
-                "system_prompt": self._data.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
             }
+            # Only write system_prompt if it's customized (not the default)
+            raw_prompt = self._data.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+            if raw_prompt and raw_prompt != DEFAULT_SYSTEM_PROMPT:
+                provider["system_prompt"] = raw_prompt
             # Update the specific key
             provider_key = "provider_type" if key == "provider" else key
             provider[provider_key] = value
@@ -320,8 +323,9 @@ class Config:
             "api_key": api_key,
             "api_base": api_base,
             "model": model,
-            "system_prompt": system_prompt or DEFAULT_SYSTEM_PROMPT,
         }
+        if system_prompt and system_prompt != DEFAULT_SYSTEM_PROMPT:
+            provider["system_prompt"] = system_prompt
         if context_window is not None:
             provider["context_window"] = context_window
         self._providers.append(provider)

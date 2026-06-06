@@ -415,6 +415,102 @@ model = "gpt-4"
         # Should fallback to default/first provider
         assert config.active_provider_name == "openai"
 
+    def test_add_provider_default_system_prompt_not_saved(self, temp_dir, monkeypatch):
+        """Test that default system_prompt is NOT written to config file."""
+        config_dir = temp_dir / ".config" / "git-cm"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.toml"
+        
+        config = Config()
+        config.config_dir = config_dir
+        config.config_file = config_file
+        
+        # Add provider without custom system_prompt
+        config.add_provider("openai", "openai", "sk-1", "gpt-4", set_default=True)
+        config.save()
+        
+        # Check that system_prompt is NOT in the saved config
+        content = config_file.read_text()
+        assert "system_prompt" not in content
+        
+        # But runtime should still return the default
+        config2 = Config()
+        config2.config_dir = config_dir
+        config2.config_file = config_file
+        config2.load()
+        assert config2.system_prompt == DEFAULT_SYSTEM_PROMPT
+
+    def test_add_provider_custom_system_prompt_saved(self, temp_dir, monkeypatch):
+        """Test that custom system_prompt IS written to config file."""
+        config_dir = temp_dir / ".config" / "git-cm"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.toml"
+        
+        config = Config()
+        config.config_dir = config_dir
+        config.config_file = config_file
+        
+        custom_prompt = "You are a specialized commit message generator."
+        # Add provider with custom system_prompt
+        config.add_provider("openai", "openai", "sk-1", "gpt-4", 
+                          system_prompt=custom_prompt, set_default=True)
+        config.save()
+        
+        # Check that system_prompt IS in the saved config
+        content = config_file.read_text()
+        assert "system_prompt" in content
+        assert custom_prompt in content
+        
+        # And runtime should return the custom prompt
+        config2 = Config()
+        config2.config_dir = config_dir
+        config2.config_file = config_file
+        config2.load()
+        assert config2.system_prompt == custom_prompt
+
+    def test_interactive_setup_no_custom_prompt_not_saved(self, temp_dir, monkeypatch):
+        """Test interactive setup without custom system_prompt does not save it."""
+        config_dir = temp_dir / ".config" / "git-cm"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "config.toml"
+        
+        config = Config()
+        config.config_dir = config_dir
+        config.config_file = config_file
+        
+        # Mock click.prompt to return test values
+        prompt_responses = {
+            "Enter provider name": "openai",
+            "Select LLM provider type": "openai",
+            "Enter your API key": "sk-test123",
+            "Custom API base URL (optional, press Enter to skip)": "",
+            "Enter model name": "gpt-4o-mini",
+        }
+        
+        def mock_prompt(*args, **kwargs):
+            text = args[0] if args else kwargs.get("text", "")
+            for key, value in prompt_responses.items():
+                if key in text:
+                    return value
+            return kwargs.get("default", "")
+        
+        monkeypatch.setattr("click.prompt", mock_prompt)
+        monkeypatch.setattr("click.confirm", lambda *args, **kwargs: False)
+        
+        interactive_setup(config)
+        config.load()  # Reload to get the saved config
+        
+        # Config should work normally
+        assert config.provider == "openai"
+        assert config.api_key == "sk-test123"
+        assert config.model == "gpt-4o-mini"
+        # system_prompt should still return default at runtime
+        assert config.system_prompt == DEFAULT_SYSTEM_PROMPT
+        
+        # But config file should NOT contain system_prompt
+        content = config_file.read_text()
+        assert "system_prompt" not in content
+
 
 class TestInteractiveSetup:
     """Test interactive configuration setup."""
