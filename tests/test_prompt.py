@@ -1,6 +1,6 @@
 """Tests for prompt generation."""
 
-from git_cm.prompt import build_prompt, build_retry_prompt, chunk_diff
+from git_cm.prompt import build_prompt, build_retry_prompt, chunk_diff, format_diff_chunk
 
 
 class TestBuildPrompt:
@@ -8,29 +8,28 @@ class TestBuildPrompt:
 
     def test_basic_prompt(self):
         """Test building a basic prompt."""
-        diff = "diff --git a/file.txt b/file.txt\n+new line"
         commits = ["feat: add feature"]
 
-        prompt = build_prompt(diff, commits)
+        prompt = build_prompt(commits)
 
         assert "<recent_commits>" in prompt
-        assert "<commit index=\"1\"\u003e" in prompt
+        assert '<commit index="1">' in prompt
         assert "feat: add feature" in prompt
-        assert "</diff>" in prompt
-        assert "<![CDATA[" in prompt
-        assert "new line" in prompt
-        assert "]]\u003e" in prompt
+        assert "<instruction>" in prompt
+        assert "1 chunk" in prompt
+        # Diff should NOT be in prompt
+        assert "<diff>" not in prompt
+        assert "<![CDATA[" not in prompt
 
     def test_prompt_with_multiple_commits(self):
         """Test prompt with multiple recent commits."""
-        diff = "+added line"
         commits = [
             "feat: add auth",
             "fix: resolve bug",
             "docs: update readme",
         ]
 
-        prompt = build_prompt(diff, commits)
+        prompt = build_prompt(commits)
 
         # Should include all commits
         assert "feat: add auth" in prompt
@@ -39,10 +38,9 @@ class TestBuildPrompt:
 
     def test_prompt_limits_commits(self):
         """Test that prompt limits to 5 commits."""
-        diff = "+change"
         commits = [f"commit {i}" for i in range(10)]
 
-        prompt = build_prompt(diff, commits)
+        prompt = build_prompt(commits)
 
         # Should only include first 5
         commit_count = prompt.count("<commit ")
@@ -50,13 +48,12 @@ class TestBuildPrompt:
 
     def test_prompt_multiline_commits(self):
         """Test that multiline commits include full message body."""
-        diff = "+change"
         commits = [
             "feat: add feature\n\nDetailed description here",
             "fix: bug fix\n\nMore details",
         ]
 
-        prompt = build_prompt(diff, commits)
+        prompt = build_prompt(commits)
 
         # Should include full messages (including body)
         assert "feat: add feature" in prompt
@@ -64,62 +61,47 @@ class TestBuildPrompt:
         assert "fix: bug fix" in prompt
         assert "More details" in prompt
 
-    def test_empty_diff(self):
-        """Test prompt with empty diff."""
-        diff = ""
-        commits = ["feat: initial"]
-
-        prompt = build_prompt(diff, commits)
-
-        assert "<diff>" in prompt
-        assert "<![CDATA[" in prompt
-
     def test_empty_commits(self):
         """Test prompt with no commits."""
-        diff = "+change"
         commits = []
 
-        prompt = build_prompt(diff, commits)
+        prompt = build_prompt(commits)
 
         # Should still work without commit history
-        assert "<diff>" in prompt
-        assert "<![CDATA[" in prompt
+        assert "<instruction>" in prompt
         # Should not have commit tags
         assert "<commit " not in prompt
         # Should have new repo note
         assert "new repository" in prompt.lower()
         assert "Conventional Commits" in prompt
 
-    def test_truncation_notice(self):
-        """Test that truncation notice is included when has_more_diff=True."""
-        diff = "diff --git a/file.txt b/file.txt\n+new line"
+    def test_total_chunks_single(self):
+        """Test that single chunk info is shown."""
         commits = ["feat: add feature"]
 
-        prompt = build_prompt(diff, commits, has_more_diff=True, total_diff_length=50000)
+        prompt = build_prompt(commits, total_chunks=1)
 
-        assert "diff truncated" in prompt
-        assert "diff_more tool" in prompt
-        assert "50000" in prompt
+        assert "1 chunk" in prompt
+        assert "diff_more" not in prompt.lower()
 
-    def test_no_truncation_notice(self):
-        """Test that truncation notice is absent when has_more_diff=False."""
-        diff = "diff --git a/file.txt b/file.txt\n+new line"
+    def test_total_chunks_multiple(self):
+        """Test that multiple chunks info includes diff_more hint."""
         commits = ["feat: add feature"]
 
-        prompt = build_prompt(diff, commits, has_more_diff=False)
+        prompt = build_prompt(commits, total_chunks=3)
 
-        assert "diff truncated" not in prompt
+        assert "3 chunk(s)" in prompt
+        assert "diff_more" in prompt.lower()
 
     def test_files_info(self):
         """Test that files section is included when files_info is provided."""
-        diff = "+change"
         commits = []
         files_info = [
             {"path": "src/main.py", "status": "modified", "is_binary": "false"},
             {"path": "assets/logo.png", "status": "added", "is_binary": "true"},
         ]
 
-        prompt = build_prompt(diff, commits, files_info=files_info)
+        prompt = build_prompt(commits, files_info=files_info)
 
         assert "<files>" in prompt
         assert 'path="src/main.py"' in prompt
@@ -132,14 +114,55 @@ class TestBuildPrompt:
 
     def test_no_files_info(self):
         """Test that files section shows placeholder when no files_info."""
-        diff = "+change"
         commits = []
 
-        prompt = build_prompt(diff, commits)
+        prompt = build_prompt(commits)
 
         assert "<files>" in prompt
         assert "No file information available" in prompt
         assert "</files>" in prompt
+
+
+class TestFormatDiffChunk:
+    """Test diff chunk formatting."""
+
+    def test_single_chunk(self):
+        """Test formatting a single chunk."""
+        chunk = "+line1\n+line2"
+        result = format_diff_chunk(chunk, total_chunks=1, current_index=0)
+
+        assert "[Diff chunk: total=1, current_index=0]" in result
+        assert "```diff" in result
+        assert "+line1" in result
+        assert "+line2" in result
+        assert "```" in result
+        assert "[This is the last chunk.]" in result
+
+    def test_first_of_multiple(self):
+        """Test formatting the first chunk of multiple."""
+        chunk = "+line1"
+        result = format_diff_chunk(chunk, total_chunks=3, current_index=0)
+
+        assert "[Diff chunk: total=3, current_index=0]" in result
+        assert "[More chunks available" in result
+        assert "This is the last chunk" not in result
+
+    def test_last_of_multiple(self):
+        """Test formatting the last chunk."""
+        chunk = "+line3"
+        result = format_diff_chunk(chunk, total_chunks=3, current_index=2)
+
+        assert "[Diff chunk: total=3, current_index=2]" in result
+        assert "[This is the last chunk.]" in result
+        assert "More chunks available" not in result
+
+    def test_middle_chunk(self):
+        """Test formatting a middle chunk."""
+        chunk = "+line2"
+        result = format_diff_chunk(chunk, total_chunks=3, current_index=1)
+
+        assert "[Diff chunk: total=3, current_index=1]" in result
+        assert "[More chunks available" in result
 
 
 class TestChunkDiff:

@@ -61,7 +61,7 @@ DIFF_MORE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "diff_more",
-        "description": "Get additional diff content that was truncated. Call this when the diff shown in the prompt was truncated and you need to see more changes to understand the full scope.",
+        "description": "Request the next chunk of the staged diff. The diff is split into multiple chunks (index starting from 0). Chunk 0 has already been provided automatically. Call this if you need to see additional changes.",
         "parameters": {
             "type": "object",
             "properties": {},

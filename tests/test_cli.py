@@ -705,14 +705,25 @@ class TestDiffMore:
                     assert "Committed:" in result.output
                     assert mock_provider.generate.call_count == 2
 
-                    # Verify the diff_more result was passed to LLM
+                    # Verify chunk 0 was in initial messages
+                    first_call_messages = mock_provider.generate.call_args_list[0][0][1]
+                    chunk0_msg = next(
+                        (m for m in first_call_messages if m.get("role") == "user" and "[Diff chunk:" in m.get("content", "")),
+                        None,
+                    )
+                    assert chunk0_msg is not None
+                    assert "[Diff chunk: total=" in chunk0_msg["content"]
+                    assert "current_index=0" in chunk0_msg["content"]
+
+                    # Verify the diff_more result (chunk 1) was passed to LLM
                     second_call_messages = mock_provider.generate.call_args_list[1][0][1]
                     tool_result_msg = next(
                         (m for m in second_call_messages if m.get("role") == "tool"),
                         None,
                     )
                     assert tool_result_msg is not None
-                    assert "```diff" in tool_result_msg["content"]
+                    assert "[Diff chunk: total=" in tool_result_msg["content"]
+                    assert "current_index=1" in tool_result_msg["content"]
                 finally:
                     os.chdir(old_cwd)
 
@@ -720,18 +731,11 @@ class TestDiffMore:
         """Test diff_more when no more content is available."""
         with patch("git_cm.cli.create_provider") as mock_create:
             mock_provider = MagicMock()
-            # First call: diff_more tool (too many times), Second call: message tool
+            # First call: diff_more tool (exhausted), Second call: message tool
             mock_provider.generate.side_effect = [
                 LLMResponse(
                     tool_calls=[{
                         "id": "call_1",
-                        "name": "diff_more",
-                        "arguments": {},
-                    }],
-                ),
-                LLMResponse(
-                    tool_calls=[{
-                        "id": "call_2",
                         "name": "diff_more",
                         "arguments": {},
                     }],
@@ -750,14 +754,15 @@ class TestDiffMore:
 
                     assert result.exit_code == 0
                     assert "feat: test commit" in result.output
-                    # Third call should get "No more diff content available"
-                    third_call_messages = mock_provider.generate.call_args_list[2][0][1]
+                    # Second call should get "No more diff content available"
+                    second_call_messages = mock_provider.generate.call_args_list[1][0][1]
                     tool_result_msg = next(
-                        (m for m in third_call_messages if m.get("role") == "tool"),
+                        (m for m in second_call_messages if m.get("role") == "tool"),
                         None,
                     )
                     assert tool_result_msg is not None
                     assert "No more diff content available" in tool_result_msg["content"]
+                    assert "Total chunks:" in tool_result_msg["content"]
                 finally:
                     os.chdir(old_cwd)
 

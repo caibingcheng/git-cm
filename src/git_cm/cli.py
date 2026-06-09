@@ -28,7 +28,7 @@ from git_cm.git_utils import (
     read_files_batch,
 )
 from git_cm.llm import LLMProvider, LLMResponse, ToolResult, create_provider, StreamChunk
-from git_cm.prompt import build_prompt, chunk_diff
+from git_cm.prompt import build_prompt, chunk_diff, format_diff_chunk
 
 
 
@@ -239,23 +239,23 @@ def main(provider, model, api_key, api_base, yes, verbose):
     else:
         verbose_echo(verbose, "No current branch (new repo without commits)")
 
-    # Generate initial prompt with first diff chunk
+    # Generate the base prompt (diff is delivered separately via chunks)
     prompt = build_prompt(
-        diff_chunks[0],
         recent_commits,
         files_info=staged_files,
-        has_more_diff=has_more_diff,
-        total_diff_length=len(full_diff),
+        total_chunks=len(diff_chunks),
     )
     if current_branch:
         prompt = f"Current branch: {current_branch}\n\n" + prompt
 
+    # Deliver chunk 0 automatically as a separate user message
+    chunk0_msg = format_diff_chunk(diff_chunks[0], len(diff_chunks), 0)
+
     verbose_echo(verbose, f"User prompt length: {len(prompt)} characters")
-    if has_more_diff:
-        verbose_echo(
-            verbose,
-            f"Diff truncated in prompt: showing {len(diff_chunks[0])} of {len(full_diff)} chars"
-        )
+    verbose_echo(
+        verbose,
+        f"Diff chunk 0: {len(diff_chunks[0])} chars (total {len(diff_chunks)} chunk(s))"
+    )
     if verbose:
         click.echo(click.style("[verbose] System prompt:", fg="magenta"))
         click.echo("-" * 40)
@@ -264,6 +264,10 @@ def main(provider, model, api_key, api_base, yes, verbose):
         click.echo(click.style("[verbose] User prompt:", fg="magenta"))
         click.echo("-" * 40)
         click.echo(prompt)
+        click.echo("-" * 40)
+        click.echo(click.style("[verbose] Diff chunk 0:", fg="magenta"))
+        click.echo("-" * 40)
+        click.echo(chunk0_msg)
         click.echo("-" * 40)
 
     # Create LLM provider
@@ -279,9 +283,10 @@ def main(provider, model, api_key, api_base, yes, verbose):
         click.echo(f"Error creating LLM provider: {e}", err=True)
         raise click.ClickException(str(e))
 
-    # Build initial messages
+    # Build initial messages: prompt + chunk 0
     messages = [
         {"role": "user", "content": prompt},
+        {"role": "user", "content": chunk0_msg},
     ]
 
     # Tool call loop
@@ -488,17 +493,11 @@ def main(provider, model, api_key, api_base, yes, verbose):
                     )
                     if diff_chunk_idx < len(diff_chunks):
                         chunk = diff_chunks[diff_chunk_idx]
-                        content = f"```diff\n{chunk}\n```"
-                        remaining = len(diff_chunks) - diff_chunk_idx - 1
+                        content = format_diff_chunk(chunk, len(diff_chunks), diff_chunk_idx)
                         verbose_echo(
                             verbose,
-                            f"Returning chunk {diff_chunk_idx} ({len(chunk)} chars), {remaining} remaining"
+                            f"Returning chunk {diff_chunk_idx} ({len(chunk)} chars)"
                         )
-                        if remaining > 0:
-                            content += (
-                                f"\n[Note: more diff available ({len(full_diff)} total chars). "
-                                f"Use diff_more again to see additional changes.]"
-                            )
                         tool_results.append(
                             ToolResult(
                                 tool_call_id=tc["id"],
@@ -512,7 +511,7 @@ def main(provider, model, api_key, api_base, yes, verbose):
                             ToolResult(
                                 tool_call_id=tc["id"],
                                 name="diff_more",
-                                content="No more diff content available.",
+                                content=f"No more diff content available. Total chunks: {len(diff_chunks)}, all have been provided.",
                             )
                         )
 

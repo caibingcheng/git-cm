@@ -66,20 +66,19 @@ def build_retry_prompt(original_prompt: str, previous_message: str, feedback: st
 
 
 def build_prompt(
-    diff: str,
     recent_commits: List[str],
     files_info: Optional[List[Dict[str, str]]] = None,
-    has_more_diff: bool = False,
-    total_diff_length: int = 0,
+    total_chunks: int = 1,
 ) -> str:
     """Build the user prompt for LLM commit message generation in XML format.
 
+    The diff itself is NOT included in this prompt. Instead, each diff chunk is
+    delivered as a separate user message via format_diff_chunk().
+
     Args:
-        diff: The staged diff text (may be a chunk if truncated)
         recent_commits: List of recent commit messages
         files_info: List of dicts with file info (path, status, is_binary)
-        has_more_diff: Whether additional diff content is available
-        total_diff_length: Total length of the original diff
+        total_chunks: Total number of diff chunks available (0-based index)
 
     Returns:
         A formatted XML prompt string for the LLM
@@ -118,17 +117,36 @@ def build_prompt(
     lines.append("</files>")
     lines.append("")
 
-    # Add the diff
-    lines.append("<diff>")
-    lines.append("<![CDATA[")
-    lines.append(diff)
-    if has_more_diff:
-        shown = len(diff)
-        lines.append(
-            f"\n[Note: diff truncated. Showing first {shown} of "
-            f"{total_diff_length} total chars. Use diff_more tool to see additional changes.]"
-        )
-    lines.append("]]>")
-    lines.append("</diff>")
+    # Add instruction about chunked diff delivery
+    lines.append("<instruction>")
+    lines.append(f"  The staged diff has been split into {total_chunks} chunk(s).")
+    lines.append("  Chunk index starts from 0. Chunk 0 will be provided automatically.")
+    if total_chunks > 1:
+        lines.append("  If you need more context, use the diff_more tool to fetch additional chunks.")
+    lines.append("</instruction>")
 
+    return "\n".join(lines)
+
+
+def format_diff_chunk(chunk: str, total_chunks: int, current_index: int) -> str:
+    """Format a single diff chunk as a user message.
+
+    Args:
+        chunk: The diff chunk content
+        total_chunks: Total number of chunks available
+        current_index: Index of this chunk (0-based)
+
+    Returns:
+        Formatted diff chunk message string
+    """
+    lines = [
+        f"[Diff chunk: total={total_chunks}, current_index={current_index}]",
+        "```diff",
+        chunk,
+        "```",
+    ]
+    if current_index < total_chunks - 1:
+        lines.append("[More chunks available. Use diff_more tool to fetch the next chunk.]")
+    else:
+        lines.append("[This is the last chunk.]")
     return "\n".join(lines)
