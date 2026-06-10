@@ -213,7 +213,6 @@ def main(provider, model, api_key, api_base, yes, verbose):
     # Split diff into chunks for incremental delivery
     diff_chunks = chunk_diff(full_diff)
     diff_chunk_idx = 0
-    has_more_diff = len(diff_chunks) > 1
     verbose_echo(verbose, f"Diff split into {len(diff_chunks)} chunk(s)")
     if verbose and len(diff_chunks) > 1:
         for i, chunk in enumerate(diff_chunks):
@@ -248,8 +247,10 @@ def main(provider, model, api_key, api_base, yes, verbose):
     if current_branch:
         prompt = f"Current branch: {current_branch}\n\n" + prompt
 
-    # Deliver chunk 0 automatically as a separate user message
+    # Deliver chunk 0 automatically merged into the prompt message
+    assert diff_chunks, "diff_chunks should not be empty"
     chunk0_msg = format_diff_chunk(diff_chunks[0], len(diff_chunks), 0)
+    prompt = prompt + "\n\n" + chunk0_msg
 
     verbose_echo(verbose, f"User prompt length: {len(prompt)} characters")
     verbose_echo(
@@ -265,10 +266,6 @@ def main(provider, model, api_key, api_base, yes, verbose):
         click.echo("-" * 40)
         click.echo(prompt)
         click.echo("-" * 40)
-        click.echo(click.style("[verbose] Diff chunk 0:", fg="magenta"))
-        click.echo("-" * 40)
-        click.echo(chunk0_msg)
-        click.echo("-" * 40)
 
     # Create LLM provider
     try:
@@ -283,10 +280,9 @@ def main(provider, model, api_key, api_base, yes, verbose):
         click.echo(f"Error creating LLM provider: {e}", err=True)
         raise click.ClickException(str(e))
 
-    # Build initial messages: prompt + chunk 0
+    # Build initial messages: prompt includes chunk 0
     messages = [
         {"role": "user", "content": prompt},
-        {"role": "user", "content": chunk0_msg},
     ]
 
     # Tool call loop

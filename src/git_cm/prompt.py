@@ -78,7 +78,7 @@ def build_prompt(
     Args:
         recent_commits: List of recent commit messages
         files_info: List of dicts with file info (path, status, is_binary)
-        total_chunks: Total number of diff chunks available (0-based index)
+        total_chunks: Total number of diff chunks available
 
     Returns:
         A formatted XML prompt string for the LLM
