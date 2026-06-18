@@ -5,9 +5,11 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import click
+import git
+from git import Repo
 
 from git_cm.config import Config, interactive_setup
 from git_cm.git_utils import (
@@ -70,7 +72,11 @@ class Spinner:
             self.thread.join()
 
 
-def show_reasoning(content: str, usage: dict = None, context_window: int = None) -> None:
+def show_reasoning(
+    content: str,
+    usage: Optional[Dict[str, Any]] = None,
+    context_window: Optional[int] = None,
+) -> None:
     """Display reasoning content in terminal with optional token usage percentage."""
     prefix = click.style("Thought: ", fg="cyan")
 
@@ -91,7 +97,7 @@ def verbose_echo(enabled: bool, message: str, **kwargs) -> None:
         click.echo(click.style("[verbose] ", fg="magenta") + message, **kwargs)
 
 
-def _fallback_stream(response):
+def _fallback_stream(response: LLMResponse) -> Generator[StreamChunk, None, None]:
     """Simulate a stream from a non-streaming response (for test mocks)."""
     if response.reasoning_content:
         yield StreamChunk(type="reasoning_delta", reasoning_delta=response.reasoning_content)
@@ -113,11 +119,11 @@ def _fallback_stream(response):
 
 
 def generate_commit_message(
-    llm_provider,
+    llm_provider: LLMProvider,
     system_prompt: str,
-    messages: List[Dict],
+    messages: List[Dict[str, Any]],
     diff_chunks: List[str],
-    repo,
+    repo: Repo,
     yes: bool,
     verbose: bool,
     provider_name: str,
@@ -219,7 +225,10 @@ def generate_commit_message(
                 verbose_echo(verbose, "No tool calls in response, requesting tool use")
                 messages.append({
                     "role": "user",
-                    "content": "Please use the `message` tool to submit your commit message. Do not return plain text.",
+                    "content": (
+                        "Please use the `message` tool to submit your commit message."
+                        " Do not return plain text."
+                    ),
                 })
                 continue
 
@@ -240,7 +249,10 @@ def generate_commit_message(
                             ToolResult(
                                 tc["id"],
                                 "message",
-                                "Error: Commit message cannot be empty. Please provide a meaningful commit message.",
+                                (
+                                    "Error: Commit message cannot be empty."
+                                    " Please provide a meaningful commit message."
+                                ),
                             )
                         )
                         continue
@@ -279,7 +291,11 @@ def generate_commit_message(
                             ToolResult(
                                 tc["id"],
                                 "message",
-                                f"User refused this commit message. Feedback: {feedback}. Please generate a new commit message based on the feedback.",
+                                (
+                                    f"User refused this commit message."
+                                    f" Feedback: {feedback}."
+                                    f" Please generate a new commit message based on the feedback."
+                                ),
                             )
                         )
 
@@ -343,7 +359,10 @@ def generate_commit_message(
                             ToolResult(
                                 tool_call_id=tc["id"],
                                 name="diff_more",
-                                content=f"No more diff content available. Total chunks: {len(diff_chunks)}, all have been provided.",
+                                content=(
+                                    f"No more diff content available."
+                                    f" Total chunks: {len(diff_chunks)}, all have been provided."
+                                ),
                             )
                         )
 
@@ -352,7 +371,10 @@ def generate_commit_message(
                         ToolResult(
                             tool_call_id=tc["id"],
                             name=tc["name"],
-                            content=f"Error: Unknown tool '{tc['name']}'. Please use one of the available tools.",
+                            content=(
+                                f"Error: Unknown tool '{tc['name']}'."
+                                f" Please use one of the available tools."
+                            ),
                         )
                     )
 
@@ -424,8 +446,8 @@ def generate_commit_message(
 
 
 def generate_message_from_diff(
-    repo,
-    config,
+    repo: Repo,
+    config: Config,
     recent_commits: List[str],
     full_diff: str,
     files_info: Optional[List[Dict[str, str]]],
@@ -471,7 +493,11 @@ def generate_message_from_diff(
     # Append AGENTS.md to system prompt
     system_prompt = config.system_prompt
     if agents_md_content:
-        system_prompt = system_prompt + "\n\nProject conventions (from AGENTS.md):\n" + agents_md_content
+        system_prompt = (
+            system_prompt
+            + "\n\nProject conventions (from AGENTS.md):\n"
+            + agents_md_content
+        )
 
     # Generate the base prompt (diff is delivered separately via chunks)
     prompt = build_prompt(
@@ -523,7 +549,10 @@ def generate_message_from_diff(
     ]
 
     click.echo(
-        click.style(f"Using provider: {config.active_provider_name} ({config.model})", fg="bright_black")
+        click.style(
+            f"Using provider: {config.active_provider_name} ({config.model})",
+            fg="bright_black",
+        )
     )
     click.echo()
 
@@ -549,10 +578,29 @@ def generate_message_from_diff(
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation and commit directly")
 @click.option("--verbose", is_flag=True, help="Enable verbose output for debugging")
 @click.option("-r", "--rewrite", is_flag=True, help="Rewrite an existing commit message")
+@click.option("-t", "--to", default=None, help="Commit to rewrite (default: HEAD)")
+@click.option("-m", "--hint", default=None, help="User hint for commit message")
 @click.argument("args", nargs=-1)
 @click.version_option(version="0.1.0")
-def main(provider, model, api_key, api_base, yes, verbose, rewrite, args):
-    """AI-powered git commit message generator."""
+def main(
+    provider: Optional[str],
+    model: Optional[str],
+    api_key: Optional[str],
+    api_base: Optional[str],
+    yes: bool,
+    verbose: bool,
+    rewrite: bool,
+    to: Optional[str],
+    hint: Optional[str],
+    args: Tuple[str, ...],
+) -> None:
+    """AI-powered git commit message generator.
+
+    Generate a commit message from staged changes, or rewrite an existing
+    commit message with -r/--rewrite. In rewrite mode, use -t/--to to specify
+    the target commit (default HEAD) and -m/--hint or positional arguments for
+    a user hint.
+    """
     # Initialize configuration
     config = Config()
 
@@ -617,21 +665,34 @@ def main(provider, model, api_key, api_base, yes, verbose, rewrite, args):
         verbose_echo(verbose, "No current branch (new repo without commits)")
 
     if rewrite:
-        # Try to interpret the first positional arg as a commit id;
-        # otherwise treat it (and any following text) as a user hint for HEAD.
+        positional_hint = " ".join(args)
+
+        if hint and positional_hint:
+            click.echo(
+                "Error: Cannot provide both --hint and a positional hint.", err=True
+            )
+            raise click.ClickException(
+                "Cannot provide both --hint and a positional hint"
+            )
+
+        user_hint = hint or positional_hint
+
+        # Explicit --to takes precedence. For backward compatibility, if the first
+        # positional argument is a valid commit id, treat it as the rewrite target.
         commit_id = "HEAD"
-        hint = " ".join(args)
-        if args:
+        if to is not None:
+            commit_id = to
+        elif args:
             try:
                 repo.commit(args[0])
                 commit_id = args[0]
-                hint = " ".join(args[1:])
-            except Exception:
+                user_hint = " ".join(args[1:]) or user_hint
+            except (git.BadName, ValueError):
                 pass
 
         try:
             target_commit = repo.commit(commit_id)
-        except Exception:
+        except git.BadName:
             click.echo(f"Error: Invalid commit '{commit_id}'.", err=True)
             raise click.ClickException(f"Invalid commit: {commit_id}")
 
@@ -642,7 +703,8 @@ def main(provider, model, api_key, api_base, yes, verbose, rewrite, args):
             )
         if is_commit_pushed(repo, target_commit.hexsha):
             warnings.append(
-                "This commit appears to have been pushed to a remote. Rewriting it may affect collaborators."
+                "This commit appears to have been pushed to a remote."
+                " Rewriting it may affect collaborators."
             )
 
         if warnings:
@@ -672,7 +734,7 @@ def main(provider, model, api_key, api_base, yes, verbose, rewrite, args):
                 full_diff,
                 files_info=None,
                 current_branch=current_branch,
-                hint=hint,
+                hint=user_hint,
                 rewrite_context=rewrite_context,
                 yes=yes,
                 verbose=verbose,
@@ -701,10 +763,25 @@ def main(provider, model, api_key, api_base, yes, verbose, rewrite, args):
                     pop_stash(repo, stash_ref)
                 except Exception as e:
                     click.echo(f"Warning: failed to restore stash: {e}", err=True)
+                    raise click.ClickException(
+                        f"Failed to restore stash {stash_ref}. "
+                        "Run 'git stash list' to locate it, then "
+                        f"'git stash pop {stash_ref}' to restore your changes manually."
+                    )
 
     else:
         # Normal mode: create a new commit from staged changes
-        hint = " ".join(args)
+        positional_hint = " ".join(args)
+
+        if hint and positional_hint:
+            click.echo(
+                "Error: Cannot provide both --hint and a positional hint.", err=True
+            )
+            raise click.ClickException(
+                "Cannot provide both --hint and a positional hint"
+            )
+
+        user_hint = hint or positional_hint or None
 
         # Check for staged changes
         if not has_staged_changes(repo):
@@ -730,7 +807,7 @@ def main(provider, model, api_key, api_base, yes, verbose, rewrite, args):
             full_diff,
             files_info=staged_files,
             current_branch=current_branch,
-            hint=hint or None,
+            hint=user_hint,
             rewrite_context=None,
             yes=yes,
             verbose=verbose,

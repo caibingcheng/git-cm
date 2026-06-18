@@ -587,7 +587,6 @@ class TestCLIWithStagedChanges:
                 finally:
                     os.chdir(old_cwd)
 
-
 class TestCLIErrors:
     """Test CLI error handling."""
 
@@ -664,6 +663,38 @@ class TestCLIErrors:
                     assert result.exit_code in [0, 1]
                 finally:
                     os.chdir(old_cwd)
+
+    def test_stash_restore_failure_raises(self, cli_runner, temp_git_repo, mock_config):
+        """Test stash restore failure raises ClickException with recovery instructions."""
+        repo = Repo(temp_git_repo)
+        new_file = temp_git_repo / "feature.txt"
+        new_file.write_text("feature content")
+        repo.index.add([str(new_file)])
+        repo.index.commit("old head message")
+        new_file.write_text("uncommitted change")
+
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.generate.return_value = message_tool_response("feat: rewritten head")
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                with patch("git_cm.cli.pop_stash") as mock_pop_stash:
+                    mock_pop_stash.side_effect = RuntimeError("stash top changed")
+
+                    old_cwd = os.getcwd()
+                    os.chdir(str(temp_git_repo))
+                    try:
+                        result = cli_runner.invoke(main, ["-r", "--yes"])
+
+                        assert result.exit_code != 0
+                        assert "Failed to restore stash" in result.output
+                        assert "git stash list" in result.output
+                        assert "git stash pop" in result.output
+                    finally:
+                        os.chdir(old_cwd)
 
 
 class TestDiffMore:
@@ -964,3 +995,180 @@ class TestCLIRewriteAndHint:
                     assert "<rewrite_context>" in user_msg
                 finally:
                     os.chdir(old_cwd)
+
+    def test_rewrite_with_to_option(self, cli_runner, temp_git_repo, mock_config):
+        """Test --to option explicitly selects the commit to rewrite."""
+        repo = Repo(temp_git_repo)
+        for i in range(2):
+            f = temp_git_repo / f"file{i}.txt"
+            f.write_text(f"content {i}")
+            repo.index.add([str(f)])
+            repo.index.commit(f"commit {i}")
+
+        commits = list(repo.iter_commits("HEAD", max_count=10))
+        target = commits[1]
+
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.generate.return_value = message_tool_response("feat: rewritten")
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                old_cwd = os.getcwd()
+                os.chdir(str(temp_git_repo))
+                try:
+                    result = cli_runner.invoke(
+                        main, ["-r", "-t", target.hexsha, "--yes"], input="y\n"
+                    )
+
+                    assert result.exit_code == 0
+                    assert "will rewrite a historical commit" in result.output
+                    new_commits = list(repo.iter_commits("HEAD", max_count=10))
+                    messages = [c.message.strip() for c in new_commits]
+                    assert "feat: rewritten" in messages
+                finally:
+                    os.chdir(old_cwd)
+
+    def test_rewrite_with_hint_option(self, cli_runner, temp_git_repo, mock_config):
+        """Test --hint option provides a user hint in rewrite mode."""
+        repo = Repo(temp_git_repo)
+        new_file = temp_git_repo / "feature.txt"
+        new_file.write_text("feature content")
+        repo.index.add([str(new_file)])
+        repo.index.commit("old head message")
+
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.generate.return_value = message_tool_response("feat: concise")
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                old_cwd = os.getcwd()
+                os.chdir(str(temp_git_repo))
+                try:
+                    result = cli_runner.invoke(
+                        main, ["-r", "-m", "make it concise", "--yes"]
+                    )
+
+                    assert result.exit_code == 0
+                    first_call_messages = mock_provider.generate.call_args_list[0][0][1]
+                    user_msg = first_call_messages[0]["content"]
+                    assert "make it concise" in user_msg
+                    assert "<rewrite_context>" in user_msg
+                finally:
+                    os.chdir(old_cwd)
+
+    def test_rewrite_to_and_positional_hint(self, cli_runner, temp_git_repo, mock_config):
+        """Test --to with a positional hint rewrites target and includes hint."""
+        repo = Repo(temp_git_repo)
+        for i in range(2):
+            f = temp_git_repo / f"file{i}.txt"
+            f.write_text(f"content {i}")
+            repo.index.add([str(f)])
+            repo.index.commit(f"commit {i}")
+
+        commits = list(repo.iter_commits("HEAD", max_count=10))
+        target = commits[1]
+
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.generate.return_value = message_tool_response("feat: rewritten")
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                old_cwd = os.getcwd()
+                os.chdir(str(temp_git_repo))
+                try:
+                    result = cli_runner.invoke(
+                        main,
+                        ["-r", "-t", target.hexsha, "--yes", "some hint"],
+                        input="y\n",
+                    )
+
+                    assert result.exit_code == 0
+                    new_commits = list(repo.iter_commits("HEAD", max_count=10))
+                    messages = [c.message.strip() for c in new_commits]
+                    assert "feat: rewritten" in messages
+
+                    first_call_messages = mock_provider.generate.call_args_list[0][0][1]
+                    user_msg = first_call_messages[0]["content"]
+                    assert "some hint" in user_msg
+                    assert "<rewrite_context>" in user_msg
+                finally:
+                    os.chdir(old_cwd)
+
+    def test_rewrite_invalid_commit_id(self, cli_runner, temp_git_repo, mock_config):
+        """Test --to with an invalid commit id exits with an error."""
+        with patch("git_cm.cli.Config") as mock_config_class:
+            mock_config_class.return_value = mock_config
+
+            old_cwd = os.getcwd()
+            os.chdir(str(temp_git_repo))
+            try:
+                result = cli_runner.invoke(
+                    main, ["-r", "-t", "notacommit", "--yes"]
+                )
+
+                assert result.exit_code != 0
+                assert "Invalid commit" in result.output
+            finally:
+                os.chdir(old_cwd)
+
+    def test_rewrite_positional_commit_id_backward_compat(
+        self, cli_runner, temp_git_repo, mock_config
+    ):
+        """Test positional commit id is treated as rewrite target for backward compat."""
+        repo = Repo(temp_git_repo)
+        for i in range(2):
+            f = temp_git_repo / f"file{i}.txt"
+            f.write_text(f"content {i}")
+            repo.index.add([str(f)])
+            repo.index.commit(f"commit {i}")
+
+        commits = list(repo.iter_commits("HEAD", max_count=10))
+        target = commits[1]
+
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.generate.return_value = message_tool_response("feat: rewritten")
+            mock_create.return_value = mock_provider
+
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+
+                old_cwd = os.getcwd()
+                os.chdir(str(temp_git_repo))
+                try:
+                    result = cli_runner.invoke(
+                        main, ["-r", target.hexsha, "--yes"], input="y\n"
+                    )
+
+                    assert result.exit_code == 0
+                    new_commits = list(repo.iter_commits("HEAD", max_count=10))
+                    messages = [c.message.strip() for c in new_commits]
+                    assert "feat: rewritten" in messages
+                finally:
+                    os.chdir(old_cwd)
+
+    def test_hint_and_positional_hint_conflict(self, cli_runner, temp_git_repo, mock_config):
+        """Test providing both --hint and a positional hint is rejected."""
+        with patch("git_cm.cli.Config") as mock_config_class:
+            mock_config_class.return_value = mock_config
+
+            old_cwd = os.getcwd()
+            os.chdir(str(temp_git_repo))
+            try:
+                result = cli_runner.invoke(
+                    main, ["--yes", "-m", "hint", "positional"]
+                )
+
+                assert result.exit_code != 0
+                assert "Cannot provide both --hint and a positional hint" in result.output
+            finally:
+                os.chdir(old_cwd)

@@ -3,12 +3,15 @@
 import os
 from pathlib import Path
 
+import click
 import git
 import pytest
 from git import Repo
 
 from git_cm.git_utils import (
     abort_rebase,
+    _build_editor_script,
+    _unlink_safely,
     get_commit_diff,
     get_current_branch,
     check_user_in_history,
@@ -71,6 +74,37 @@ class TestGitRepoChecks:
         """Test getting repo object."""
         repo = get_repo(temp_git_repo)
         assert isinstance(repo, Repo)
+
+
+class TestBuildEditorScript:
+    """Test _build_editor_script helper."""
+
+    def test_build_editor_script_creates_executable_file(self):
+        """Verify the returned path exists, is executable, and contains the template content."""
+        template = "#!/usr/bin/env python3\nprint('hello')\n"
+        path = _build_editor_script(template)
+
+        assert os.path.exists(path)
+        assert os.access(path, os.X_OK)
+        assert Path(path).read_text() == template
+
+        _unlink_safely(path)
+
+    def test_build_editor_script_cleans_up_on_write_failure(self, monkeypatch):
+        """Verify no temp file is left behind when chmod fails."""
+        recorded_paths = []
+
+        def failing_chmod(path, mode):
+            recorded_paths.append(path)
+            raise OSError("chmod failed")
+
+        monkeypatch.setattr("git_cm.git_utils.os.chmod", failing_chmod)
+
+        with pytest.raises(OSError, match="chmod failed"):
+            _build_editor_script("content")
+
+        assert len(recorded_paths) == 1
+        assert not os.path.exists(recorded_paths[0])
 
 
 class TestStagedChanges:
@@ -489,6 +523,28 @@ class TestStashChanges:
         with pytest.raises(RuntimeError, match="Stash stack changed unexpectedly"):
             pop_stash(repo, ref1)
 
+    def test_pop_stash_failure_message(self, temp_git_repo):
+        """Test pop_stash includes recovery guidance when stash top changed."""
+        repo = get_repo(temp_git_repo)
+        f1 = temp_git_repo / "a.txt"
+        f1.write_text("a")
+        repo.index.add([str(f1)])
+        ref1 = stash_changes(repo, "first")
+
+        f2 = temp_git_repo / "b.txt"
+        f2.write_text("b")
+        repo.index.add([str(f2)])
+        stash_changes(repo, "second")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            pop_stash(repo, ref1)
+
+        message = str(exc_info.value)
+        assert "Expected" in message
+        assert "found" in message
+        assert "git stash list" in message
+        assert "restore manually" in message
+
 
 class TestCommitDiff:
     """Test retrieving a specific commit diff."""
@@ -505,6 +561,12 @@ class TestCommitDiff:
 
         assert "modified content" in diff
         assert "initial content" in diff
+
+    def test_get_commit_diff_invalid_commit(self, temp_git_repo):
+        """Test passing a non-existent commit sha returns empty string."""
+        repo = get_repo(temp_git_repo)
+        diff = get_commit_diff(repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        assert diff == ""
 
 
 class TestIsCommitPushed:
@@ -531,6 +593,12 @@ class TestIsCommitPushed:
         commit = repo.index.commit("local commit")
 
         assert is_commit_pushed(repo, commit.hexsha) is False
+
+    def test_is_commit_pushed_invalid_commit(self, temp_git_repo):
+        """Test passing a non-existent commit sha returns False."""
+        repo = get_repo(temp_git_repo)
+        result = is_commit_pushed(repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        assert result is False
 
 
 class TestRewriteCommitMessage:
@@ -578,6 +646,40 @@ class TestRewriteCommitMessage:
         new_root = list(repo.iter_commits("HEAD", max_count=10))[-1]
         assert new_root.message.strip() == "new root message"
         assert new_root.hexsha != root.hexsha
+
+    def test_rewrite_commit_message_aborts_rebase_on_conflict(self, temp_git_repo):
+        """Test that rewrite_commit_message aborts an in-progress rebase on failure."""
+        repo = get_repo(temp_git_repo)
+        base_file = temp_git_repo / "file.txt"
+        base_file.write_text("base")
+        repo.index.add([str(base_file)])
+        repo.index.commit("base")
+
+        # Create branch with conflicting change
+        repo.create_head("feature")
+        repo.heads.feature.checkout()
+        base_file.write_text("feature")
+        repo.index.add([str(base_file)])
+        repo.index.commit("feature change")
+
+        # Return to master and make conflicting change
+        repo.heads.master.checkout()
+        base_file.write_text("master")
+        repo.index.add([str(base_file)])
+        master_commit = repo.index.commit("master change")
+
+        # Start rebase that will conflict
+        try:
+            repo.git.rebase("master", "feature")
+        except Exception:
+            pass
+
+        assert is_rebasing(repo) is True
+
+        with pytest.raises(click.ClickException):
+            rewrite_commit_message(repo, master_commit.hexsha, "rewritten master")
+
+        assert is_rebasing(repo) is False
 
 
 class TestRebaseState:

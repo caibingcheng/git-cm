@@ -1,5 +1,6 @@
 """Git operations for git-cm."""
 
+import configparser
 import os
 import subprocess
 import tempfile
@@ -29,7 +30,7 @@ def has_staged_changes(repo: Repo) -> bool:
     """Check if there are staged changes in the repository."""
     try:
         return len(repo.index.diff("HEAD")) > 0
-    except Exception:
+    except (git.BadName, git.BadObject):
         # New repository without any commits (no HEAD)
         return len(repo.index.entries) > 0
 
@@ -38,12 +39,12 @@ def get_user_config(repo: Repo) -> dict:
     """Get user name and email from git config."""
     try:
         name = repo.config_reader().get_value("user", "name")
-    except Exception:
+    except (configparser.NoSectionError, configparser.NoOptionError):
         name = ""
     
     try:
         email = repo.config_reader().get_value("user", "email")
-    except Exception:
+    except (configparser.NoSectionError, configparser.NoOptionError):
         email = ""
     
     return {"name": name, "email": email}
@@ -54,7 +55,7 @@ def get_recent_commits(repo: Repo, n: int = 5) -> list:
     try:
         commits = list(repo.iter_commits("HEAD", max_count=n))
         return [commit.message.strip() for commit in commits]
-    except Exception:
+    except (git.BadName, git.BadObject):
         return []
 
 
@@ -65,7 +66,7 @@ def get_current_branch(repo: Repo) -> Optional[str]:
     """
     try:
         return repo.active_branch.name
-    except Exception:
+    except (TypeError, ValueError, git.InvalidGitRepositoryError):
         return None
 
 
@@ -78,7 +79,7 @@ def check_user_in_history(repo: Repo, name: str, email: str) -> bool:
             if name == commit_name or email == commit_email:
                 return True
         return False
-    except Exception:
+    except (git.BadName, git.BadObject):
         return False
 
 def get_staged_files(repo: Repo) -> List[Dict[str, str]]:
@@ -185,12 +186,17 @@ def commit_changes(repo: Repo, message: str) -> None:
     try:
         repo.index.commit(message)
         click.echo(f"Committed: {message}")
-    except Exception as e:
+    except (git.GitCommandError, OSError) as e:
         click.echo(f"Error committing changes: {e}", err=True)
         raise click.ClickException(str(e))
 
 
-def read_file(repo: Repo, relative_path: str, start_line: int = 1, end_line: Optional[int] = None) -> str:
+def read_file(
+    repo: Repo,
+    relative_path: str,
+    start_line: int = 1,
+    end_line: Optional[int] = None,
+) -> str:
     """Read file content from the repository working tree.
 
     Args:
@@ -245,7 +251,11 @@ def read_file(repo: Repo, relative_path: str, start_line: int = 1, end_line: Opt
         return f"[Error reading '{relative_path}': {e}]"
 
 
-def read_files_batch(repo: Repo, requests: List[Dict], max_total_chars: int = 4000) -> Dict[str, Dict[str, str]]:
+def read_files_batch(
+    repo: Repo,
+    requests: List[Dict],
+    max_total_chars: int = 4000,
+) -> Dict[str, Dict[str, str]]:
     """Read multiple files with cumulative budget.
 
     Args:
@@ -287,8 +297,12 @@ def read_files_batch(repo: Repo, requests: List[Dict], max_total_chars: int = 40
             remaining = max_total_chars - cumulative
             if remaining > 100:
                 truncated = content[:remaining]
+                note = (
+                    f"\n[Note: truncated from {len(content)} to "
+                    f"{remaining} chars (budget limit)]"
+                )
                 results[path] = {
-                    "content": truncated + f"\n[Note: truncated from {len(content)} to {remaining} chars (budget limit)]",
+                    "content": truncated + note,
                     "status": "truncated",
                 }
                 cumulative = max_total_chars
@@ -322,7 +336,12 @@ def find_agents_md(repo: Repo) -> str:
     return ""
 
 
-def grep_repo(repo: Repo, pattern: str, include: Optional[str] = None, max_results: int = 50) -> str:
+def grep_repo(
+    repo: Repo,
+    pattern: str,
+    include: Optional[str] = None,
+    max_results: int = 50,
+) -> str:
     """Search for pattern in repository files using grep.
 
     Args:
@@ -379,7 +398,8 @@ def grep_repo(repo: Repo, pattern: str, include: Optional[str] = None, max_resul
 
         if len(valid_paths) > max_results:
             truncated = valid_paths[:max_results]
-            truncated.append(f"[Note: {len(valid_paths)} total matches, showing first {max_results}]")
+            note = f"[Note: {len(valid_paths)} total matches, showing first {max_results}]"
+            truncated.append(note)
             return "\n".join(truncated)
 
         return "\n".join(valid_paths)
@@ -396,7 +416,7 @@ def has_uncommitted_changes(repo: Repo) -> bool:
     """Check if there are staged, unstaged, or untracked changes."""
     try:
         return repo.is_dirty(index=True, working_tree=True, untracked_files=True)
-    except Exception:
+    except git.GitCommandError:
         return False
 
 
@@ -414,7 +434,7 @@ def stash_changes(repo: Repo, message: str = "git-cm rewrite backup") -> Optiona
         if "No local changes to save" in output:
             return None
         return repo.git.rev_parse("refs/stash")
-    except Exception as e:
+    except git.GitCommandError as e:
         click.echo(f"Error stashing changes: {e}", err=True)
         raise click.ClickException(str(e))
 
@@ -423,7 +443,7 @@ def pop_stash(repo: Repo, expected_ref: str) -> None:
     """Pop the stash, verifying it is still the expected ref on top."""
     try:
         current_top = repo.git.rev_parse("refs/stash")
-    except Exception as e:
+    except git.GitCommandError as e:
         raise RuntimeError(f"Cannot locate stash to restore: {e}")
 
     if current_top != expected_ref:
@@ -435,7 +455,7 @@ def pop_stash(repo: Repo, expected_ref: str) -> None:
 
     try:
         repo.git.stash("pop")
-    except Exception as e:
+    except git.GitCommandError as e:
         raise RuntimeError(f"Failed to pop stash: {e}")
 
 
@@ -449,7 +469,7 @@ def abort_rebase(repo: Repo) -> None:
     """Abort an in-progress rebase, ignoring errors."""
     try:
         repo.git.rebase("--abort")
-    except Exception:
+    except git.GitCommandError:
         pass
 
 
@@ -464,7 +484,7 @@ def get_commit_diff(repo: Repo, commit_sha: str) -> str:
             "--find-renames",
         )
         return diff
-    except Exception as e:
+    except git.GitCommandError as e:
         click.echo(f"Warning: Failed to get commit diff: {e}", err=True)
         return ""
 
@@ -474,21 +494,32 @@ def is_commit_pushed(repo: Repo, commit_sha: str) -> bool:
     try:
         output = repo.git.branch("-r", "--contains", commit_sha)
         return bool(output.strip())
-    except Exception:
+    except git.GitCommandError:
         return False
+
+
+def _unlink_safely(path: Optional[str]) -> None:
+    """Remove a file, ignoring errors if it doesn't exist or is already removed."""
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def _build_editor_script(content_template: str) -> str:
     """Create a temporary executable script and return its path."""
-    fd, path = tempfile.mkstemp(suffix=".py")
+    f = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
     try:
-        with os.fdopen(fd, "w") as f:
+        with f:
             f.write(content_template)
-    except Exception:
-        os.close(fd)
+            path = f.name
+        os.chmod(path, 0o755)
+        return path
+    except OSError:
+        _unlink_safely(f.name)
         raise
-    os.chmod(path, 0o755)
-    return path
 
 
 def rewrite_commit_message(repo: Repo, commit_sha: str, new_message: str) -> None:
@@ -496,6 +527,16 @@ def rewrite_commit_message(repo: Repo, commit_sha: str, new_message: str) -> Non
 
     Supports HEAD amend, intermediate commits via rebase, and root commits.
     """
+    try:
+        _do_rewrite_commit_message(repo, commit_sha, new_message)
+    except Exception:
+        if is_rebasing(repo):
+            abort_rebase(repo)
+        raise
+
+
+def _do_rewrite_commit_message(repo: Repo, commit_sha: str, new_message: str) -> None:
+    """Internal implementation of rewrite_commit_message."""
     commit = repo.commit(commit_sha)
     head_commit = repo.head.commit
 
@@ -503,7 +544,7 @@ def rewrite_commit_message(repo: Repo, commit_sha: str, new_message: str) -> Non
     if commit == head_commit:
         try:
             repo.git.commit("--amend", "-m", new_message)
-        except Exception as e:
+        except git.GitCommandError as e:
             click.echo(f"Error amending commit: {e}", err=True)
             raise click.ClickException(str(e))
         return
@@ -518,7 +559,7 @@ def rewrite_commit_message(repo: Repo, commit_sha: str, new_message: str) -> Non
                 repo.git.update_ref("HEAD", new_sha)
             else:
                 repo.git.rebase("--onto", new_sha, "--root")
-        except Exception as e:
+        except git.GitCommandError as e:
             click.echo(f"Error rewriting root commit: {e}", err=True)
             raise click.ClickException(str(e))
         return
@@ -526,9 +567,12 @@ def rewrite_commit_message(repo: Repo, commit_sha: str, new_message: str) -> Non
     # Intermediate commit: interactive rebase with editor scripts
     parent_sha = parents[0].hexsha
     target_prefix = commit_sha[:7]
+    seq_editor_script = None
+    msg_editor_script = None
 
-    seq_editor_script = _build_editor_script(
-        f"""#!/usr/bin/env python3
+    try:
+        seq_editor_script = _build_editor_script(
+            f"""#!/usr/bin/env python3
 import sys
 path = sys.argv[1]
 with open(path, "r") as f:
@@ -536,27 +580,30 @@ with open(path, "r") as f:
 with open(path, "w") as f:
     for line in lines:
         parts = line.split()
-        if len(parts) >= 2 and parts[0] == "pick" and parts[1].startswith("{target_prefix}"):
+        if (
+            len(parts) >= 2
+            and parts[0] == "pick"
+            and parts[1].startswith("{target_prefix}")
+        ):
             f.write(line.replace("pick ", "reword ", 1))
         else:
             f.write(line)
 """
-    )
+        )
 
-    msg_editor_script = _build_editor_script(
-        f"""#!/usr/bin/env python3
+        msg_editor_script = _build_editor_script(
+            f"""#!/usr/bin/env python3
 import sys
 with open(sys.argv[1], "w") as f:
     f.write({repr(new_message)})
 """
-    )
+        )
 
-    env = os.environ.copy()
-    env["GIT_SEQUENCE_EDITOR"] = seq_editor_script
-    env["GIT_EDITOR"] = msg_editor_script
+        env = os.environ.copy()
+        env["GIT_SEQUENCE_EDITOR"] = seq_editor_script
+        env["GIT_EDITOR"] = msg_editor_script
 
-    try:
-        result = subprocess.run(
+        subprocess.run(
             ["git", "rebase", "-i", parent_sha],
             cwd=str(repo.working_tree_dir),
             env=env,
@@ -565,18 +612,16 @@ with open(sys.argv[1], "w") as f:
             text=True,
         )
     except subprocess.CalledProcessError as e:
+        if is_rebasing(repo):
+            abort_rebase(repo)
         stderr = e.stderr.strip() if e.stderr else str(e)
         click.echo(f"Error rewriting commit via rebase: {stderr}", err=True)
         raise click.ClickException(f"Failed to rewrite commit: {stderr}")
-    except Exception as e:
+    except OSError as e:
+        if is_rebasing(repo):
+            abort_rebase(repo)
         click.echo(f"Error rewriting commit: {e}", err=True)
         raise click.ClickException(str(e))
     finally:
-        try:
-            os.unlink(seq_editor_script)
-        except Exception:
-            pass
-        try:
-            os.unlink(msg_editor_script)
-        except Exception:
-            pass
+        _unlink_safely(seq_editor_script)
+        _unlink_safely(msg_editor_script)
