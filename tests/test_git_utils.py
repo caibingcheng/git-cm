@@ -8,6 +8,8 @@ import pytest
 from git import Repo
 
 from git_cm.git_utils import (
+    abort_rebase,
+    get_commit_diff,
     get_current_branch,
     check_user_in_history,
     commit_changes,
@@ -18,9 +20,15 @@ from git_cm.git_utils import (
     get_user_config,
     grep_repo,
     has_staged_changes,
+    has_uncommitted_changes,
+    is_commit_pushed,
     is_git_repo,
+    is_rebasing,
+    pop_stash,
     read_file,
     read_files_batch,
+    rewrite_commit_message,
+    stash_changes,
 )
 
 
@@ -413,7 +421,195 @@ class TestGetCurrentBranch:
         repo_path = tmp_path / "new-repo"
         repo_path.mkdir()
         repo = Repo.init(repo_path)
-        
+
         branch = get_current_branch(repo)
-        
+
         assert branch == "master"
+
+
+class TestHasUncommittedChanges:
+    """Test detection of uncommitted changes."""
+
+    def test_clean_repo(self, temp_git_repo):
+        """Test clean repository returns False."""
+        repo = get_repo(temp_git_repo)
+        assert has_uncommitted_changes(repo) is False
+
+    def test_staged_changes(self, temp_git_repo):
+        """Test staged changes are detected."""
+        repo = get_repo(temp_git_repo)
+        test_file = temp_git_repo / "test.txt"
+        test_file.write_text("modified content")
+        repo.index.add([str(test_file)])
+        assert has_uncommitted_changes(repo) is True
+
+    def test_untracked_files(self, temp_git_repo):
+        """Test untracked files are detected."""
+        repo = get_repo(temp_git_repo)
+        (temp_git_repo / "untracked.txt").write_text("untracked")
+        assert has_uncommitted_changes(repo) is True
+
+
+class TestStashChanges:
+    """Test stash and restore operations."""
+
+    def test_stash_and_pop(self, temp_git_repo):
+        """Test stashing and popping restores changes."""
+        repo = get_repo(temp_git_repo)
+        test_file = temp_git_repo / "test.txt"
+        test_file.write_text("stashed content")
+        repo.index.add([str(test_file)])
+
+        ref = stash_changes(repo, "test stash")
+        assert ref is not None
+        assert has_uncommitted_changes(repo) is False
+
+        pop_stash(repo, ref)
+        assert "stashed content" in test_file.read_text()
+
+    def test_stash_nothing_returns_none(self, temp_git_repo):
+        """Test stashing clean repo returns None."""
+        repo = get_repo(temp_git_repo)
+        ref = stash_changes(repo, "empty stash")
+        assert ref is None
+
+    def test_pop_stash_ref_changed(self, temp_git_repo):
+        """Test pop detects unexpected stash stack changes."""
+        repo = get_repo(temp_git_repo)
+        f1 = temp_git_repo / "a.txt"
+        f1.write_text("a")
+        repo.index.add([str(f1)])
+        ref1 = stash_changes(repo, "first")
+
+        f2 = temp_git_repo / "b.txt"
+        f2.write_text("b")
+        repo.index.add([str(f2)])
+        stash_changes(repo, "second")
+
+        with pytest.raises(RuntimeError, match="Stash stack changed unexpectedly"):
+            pop_stash(repo, ref1)
+
+
+class TestCommitDiff:
+    """Test retrieving a specific commit diff."""
+
+    def test_get_commit_diff(self, temp_git_repo):
+        """Test diff of a commit includes changes."""
+        repo = get_repo(temp_git_repo)
+        test_file = temp_git_repo / "test.txt"
+        test_file.write_text("modified content")
+        repo.index.add([str(test_file)])
+        commit = repo.index.commit("modify file")
+
+        diff = get_commit_diff(repo, commit.hexsha)
+
+        assert "modified content" in diff
+        assert "initial content" in diff
+
+
+class TestIsCommitPushed:
+    """Test detection of pushed commits."""
+
+    def test_commit_pushed_true(self, temp_git_repo):
+        """Test commit pushed to remote is detected."""
+        repo = get_repo(temp_git_repo)
+        remote_path = temp_git_repo.parent / "remote.git"
+        remote_path.mkdir()
+        Repo.init(remote_path, bare=True)
+        repo.create_remote("origin", str(remote_path))
+        repo.git.push("-u", "origin", "master")
+
+        head_sha = repo.head.commit.hexsha
+        assert is_commit_pushed(repo, head_sha) is True
+
+    def test_commit_pushed_false(self, temp_git_repo):
+        """Test local-only commit is not detected as pushed."""
+        repo = get_repo(temp_git_repo)
+        local_file = temp_git_repo / "local.txt"
+        local_file.write_text("local")
+        repo.index.add([str(local_file)])
+        commit = repo.index.commit("local commit")
+
+        assert is_commit_pushed(repo, commit.hexsha) is False
+
+
+class TestRewriteCommitMessage:
+    """Test rewriting commit messages."""
+
+    def test_rewrite_head(self, temp_git_repo):
+        """Test rewriting HEAD with amend."""
+        repo = get_repo(temp_git_repo)
+        new_file = temp_git_repo / "new.txt"
+        new_file.write_text("content")
+        repo.index.add([str(new_file)])
+        repo.index.commit("old head message")
+
+        rewrite_commit_message(repo, repo.head.commit.hexsha, "new head message")
+
+        assert repo.head.commit.message.strip() == "new head message"
+
+    def test_rewrite_intermediate_commit(self, temp_git_repo):
+        """Test rewriting an intermediate commit."""
+        repo = get_repo(temp_git_repo)
+        for i in range(2):
+            f = temp_git_repo / f"file{i}.txt"
+            f.write_text(f"content {i}")
+            repo.index.add([str(f)])
+            repo.index.commit(f"commit {i}")
+
+        commits = list(repo.iter_commits("HEAD", max_count=10))
+        target = commits[1]
+        old_head = commits[0]
+
+        rewrite_commit_message(repo, target.hexsha, "rewritten middle")
+
+        new_commits = list(repo.iter_commits("HEAD", max_count=10))
+        messages = [c.message.strip() for c in new_commits]
+        assert "rewritten middle" in messages
+        assert new_commits[0].hexsha != old_head.hexsha
+
+    def test_rewrite_root_commit(self, temp_git_repo):
+        """Test rewriting the root commit."""
+        repo = get_repo(temp_git_repo)
+        root = list(repo.iter_commits("HEAD", max_count=10))[-1]
+
+        rewrite_commit_message(repo, root.hexsha, "new root message")
+
+        new_root = list(repo.iter_commits("HEAD", max_count=10))[-1]
+        assert new_root.message.strip() == "new root message"
+        assert new_root.hexsha != root.hexsha
+
+
+class TestRebaseState:
+    """Test rebase state detection and abort."""
+
+    def test_is_rebasing_and_abort(self, temp_git_repo):
+        """Test detecting and aborting a rebase."""
+        repo = get_repo(temp_git_repo)
+        base_file = temp_git_repo / "file.txt"
+        base_file.write_text("base")
+        repo.index.add([str(base_file)])
+        base_commit = repo.index.commit("base")
+
+        # Create branch with conflicting change
+        repo.create_head("feature")
+        repo.heads.feature.checkout()
+        base_file.write_text("feature")
+        repo.index.add([str(base_file)])
+        repo.index.commit("feature change")
+
+        # Return to master and make conflicting change
+        repo.heads.master.checkout()
+        base_file.write_text("master")
+        repo.index.add([str(base_file)])
+        repo.index.commit("master change")
+
+        # Start rebase that will conflict
+        try:
+            repo.git.rebase("master", "feature")
+        except Exception:
+            pass
+
+        assert is_rebasing(repo) is True
+        abort_rebase(repo)
+        assert is_rebasing(repo) is False

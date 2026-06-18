@@ -69,6 +69,8 @@ def build_prompt(
     recent_commits: List[str],
     files_info: Optional[List[Dict[str, str]]] = None,
     total_chunks: int = 1,
+    hint: Optional[str] = None,
+    rewrite_context: Optional[Dict[str, str]] = None,
 ) -> str:
     """Build the user prompt for LLM commit message generation in XML format.
 
@@ -79,11 +81,39 @@ def build_prompt(
         recent_commits: List of recent commit messages
         files_info: List of dicts with file info (path, status, is_binary)
         total_chunks: Total number of diff chunks available
+        hint: Optional user-provided hint text
+        rewrite_context: Optional dict with keys:
+            - original_message: the commit message being rewritten
+            - commit_sha: target commit sha
+            - commit_summary: one-line summary of the target commit
 
     Returns:
         A formatted XML prompt string for the LLM
     """
     lines = []
+
+    # Add user hint section
+    if hint:
+        lines.append("<user_hint>")
+        lines.append(f"  {_escape_xml(hint)}")
+        lines.append("</user_hint>")
+        lines.append("")
+
+    # Add rewrite context section
+    if rewrite_context:
+        lines.append("<rewrite_context>")
+        lines.append(f"  <target_commit sha=\"{_escape_xml(rewrite_context.get('commit_sha', ''))}\">")
+        lines.append(f"    {_escape_xml(rewrite_context.get('commit_summary', ''))}")
+        lines.append("  </target_commit>")
+        lines.append("  <original_message>")
+        original_message = rewrite_context.get("original_message", "")
+        max_message_len = 2000
+        if len(original_message) > max_message_len:
+            original_message = original_message[:max_message_len] + "\n[... truncated]"
+        lines.append(f"    {_escape_xml(original_message)}")
+        lines.append("  </original_message>")
+        lines.append("</rewrite_context>")
+        lines.append("")
 
     # Add recent commit history section
     lines.append("<recent_commits>")
@@ -119,10 +149,17 @@ def build_prompt(
 
     # Add instruction about chunked diff delivery
     lines.append("<instruction>")
-    lines.append(f"  The staged diff has been split into {total_chunks} chunk(s).")
+    if rewrite_context:
+        lines.append(f"  The target commit diff has been split into {total_chunks} chunk(s).")
+        lines.append("  You are rewriting an existing commit message because the user does not accept the original message.")
+        lines.append("  Analyze the original message and the diff below, then generate a new, improved commit message that follows the repository conventions.")
+    else:
+        lines.append(f"  The staged diff has been split into {total_chunks} chunk(s).")
     lines.append("  Chunk index starts from 0. Chunk 0 will be provided automatically.")
     if total_chunks > 1:
         lines.append("  If you need more context, use the diff_more tool to fetch additional chunks.")
+    if hint:
+        lines.append("  The user provided an additional hint above. Please consider it with higher priority when generating the commit message.")
     lines.append("</instruction>")
 
     return "\n".join(lines)

@@ -40,7 +40,24 @@ git-cm
 
 # Skip confirmation and commit directly
 git-cm --yes
+
+# Provide an optional hint to guide the generated message
+git-cm 'focus on the auth fix'
+
+# Rewrite the latest commit message
+git-cm -r
+
+# Rewrite a specific commit message
+git-cm -r <commit-id>
+
+# Rewrite with a hint
+git-cm -r 'make the message more formal'
 ```
+
+When rewriting a commit, `git-cm` will:
+- Stash any uncommitted changes (including untracked files) and restore them afterward.
+- Show the target commit's diff to the LLM for context.
+- Warn you if the commit is not `HEAD` or has already been pushed, and ask for confirmation.
 
 After installation, you can also use `git cm` as a git subcommand.
 
@@ -109,6 +126,7 @@ git-cm --provider openai --model gpt-4o --api-key sk-...
 | `--api-key` | API key |
 | `--api-base` | Custom API base URL |
 | `--yes`, `-y` | Skip confirmation and commit directly |
+| `-r`, `--rewrite` | Rewrite an existing commit message |
 | `--verbose` | Enable verbose output for debugging |
 | `--version` | Show version |
 

@@ -122,6 +122,32 @@ class TestBuildPrompt:
         assert "No file information available" in prompt
         assert "</files>" in prompt
 
+    def test_prompt_with_hint(self):
+        """Test that user hint is included in prompt."""
+        commits = ["feat: add feature"]
+
+        prompt = build_prompt(commits, hint="use formal tone")
+
+        assert "<user_hint>" in prompt
+        assert "use formal tone" in prompt
+        assert "hint above" in prompt
+
+    def test_prompt_with_rewrite_context(self):
+        """Test that rewrite context is included in prompt."""
+        commits = ["feat: add feature"]
+        rewrite_context = {
+            "original_message": "old message\n\nbody",
+            "commit_sha": "abc1234",
+            "commit_summary": "old message",
+        }
+
+        prompt = build_prompt(commits, rewrite_context=rewrite_context)
+
+        assert "<rewrite_context>" in prompt
+        assert "abc1234" in prompt
+        assert "old message" in prompt
+        assert "does not accept the original message" in prompt
+
 
 class TestFormatDiffChunk:
     """Test diff chunk formatting."""

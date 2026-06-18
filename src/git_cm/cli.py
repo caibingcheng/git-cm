@@ -1,21 +1,21 @@
 """CLI entry point for git-cm."""
 
-"""CLI entry point for git-cm."""
-
 import json
-import os
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Dict, List, Optional
 
 import click
 
 from git_cm.config import Config, interactive_setup
 from git_cm.git_utils import (
+    abort_rebase,
     check_user_in_history,
     commit_changes,
     find_agents_md,
+    get_commit_diff,
     get_current_branch,
     get_recent_commits,
     get_repo,
@@ -24,12 +24,17 @@ from git_cm.git_utils import (
     get_user_config,
     grep_repo,
     has_staged_changes,
+    has_uncommitted_changes,
+    is_commit_pushed,
     is_git_repo,
+    is_rebasing,
+    pop_stash,
     read_files_batch,
+    rewrite_commit_message,
+    stash_changes,
 )
 from git_cm.llm import LLMProvider, LLMResponse, ToolResult, create_provider, StreamChunk
 from git_cm.prompt import build_prompt, chunk_diff, format_diff_chunk
-
 
 
 class Spinner:
@@ -68,7 +73,7 @@ class Spinner:
 def show_reasoning(content: str, usage: dict = None, context_window: int = None) -> None:
     """Display reasoning content in terminal with optional token usage percentage."""
     prefix = click.style("Thought: ", fg="cyan")
-    
+
     # Calculate token usage percentage if available
     usage_text = ""
     if usage and context_window:
@@ -76,7 +81,7 @@ def show_reasoning(content: str, usage: dict = None, context_window: int = None)
         if total_tokens > 0 and context_window > 0:
             percentage = (total_tokens / context_window) * 100
             usage_text = click.style(f" [{percentage:.1f}%]", fg="yellow")
-    
+
     click.echo(prefix + click.style(f"{content}", fg="bright_black") + usage_text + "\n")
 
 
@@ -107,201 +112,34 @@ def _fallback_stream(response):
         )
 
 
-@click.command()
-@click.option("--provider", help="LLM provider (openai or anthropic)")
-@click.option("--model", help="Model name")
-@click.option("--api-key", help="API key")
-@click.option("--api-base", help="Custom API base URL")
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation and commit directly")
-@click.option("--verbose", is_flag=True, help="Enable verbose output for debugging")
-@click.version_option(version="0.1.0")
-def main(provider, model, api_key, api_base, yes, verbose):
-    """AI-powered git commit message generator."""
-    # Initialize configuration
-    config = Config()
+def generate_commit_message(
+    llm_provider,
+    system_prompt: str,
+    messages: List[Dict],
+    diff_chunks: List[str],
+    repo,
+    yes: bool,
+    verbose: bool,
+    provider_name: str,
+    model_name: str,
+    action_label: str = "committing",
+) -> Optional[str]:
+    """Run the LLM tool-call loop to generate a commit message.
 
-    # Set CLI overrides
-    config.set_cli_override("provider", provider)
-    config.set_cli_override("model", model)
-    config.set_cli_override("api_key", api_key)
-    config.set_cli_override("api_base", api_base)
-
-    # Load configuration
-    config.load()
-
-    # Interactive setup if not configured
-    if not config.is_configured():
-        click.echo("No configuration found.")
-        interactive_setup(config)
-        config.load()  # Reload after setup
-
-    # Check if we're in a git repository
-    current_dir = Path.cwd()
-    if not is_git_repo(current_dir):
-        click.echo("Error: Not a git repository.", err=True)
-        raise click.ClickException("Not a git repository")
-
-    # Get repository
-    repo = get_repo(current_dir)
-
-    # Check for staged changes
-    if not has_staged_changes(repo):
-        click.echo("Error: No staged changes found.", err=True)
-        click.echo("Use 'git add' to stage changes before running git-cm.", err=True)
-        raise click.ClickException("No staged changes")
-
-    # Get user config
-    user_config = get_user_config(repo)
-    user_name = user_config["name"]
-    user_email = user_config["email"]
-
-    click.echo(f"Git user: {user_name} <{user_email}>")
-    verbose_echo(verbose, f"Working directory: {current_dir}")
-    verbose_echo(verbose, f"Repo path: {repo.working_tree_dir}")
-
-    # Check if user appears in history
-    if not check_user_in_history(repo, user_name, user_email):
-        click.echo()
-        click.echo(
-            "Warning: Your git user name or email does not appear in recent commit history."
-        )
-        click.echo("This might indicate incorrect git configuration.")
-
-        if not click.confirm("Do you want to continue?"):
-            click.echo("Aborted.")
-            return
-
-    # Get recent commits
-    recent_commits = get_recent_commits(repo, n=5)
-    click.echo(f"Found {len(recent_commits)} recent commits")
-    if verbose and recent_commits:
-        for i, commit in enumerate(recent_commits, 1):
-            first_line = commit.split("\n")[0]
-            verbose_echo(verbose, f"  Commit {i}: {first_line}")
-
-    # Analyze style
-
-
-    # Analyze style
-
-    # Get staged files and diff
-    staged_files = get_staged_files(repo)
-    if staged_files:
-        click.echo(f"Found {len(staged_files)} staged file(s)")
-        if verbose:
-            for f in staged_files:
-                file_type = "binary" if f["is_binary"] == "true" else "text"
-                verbose_echo(verbose, f"  {f['status']:10} {f['path']} ({file_type})")
-    
-    full_diff = get_staged_diff(repo)
-    verbose_echo(verbose, f"Diff length: {len(full_diff)} characters")
-
-    if not full_diff.strip():
-        click.echo("Error: Could not retrieve staged diff.", err=True)
-        raise click.ClickException("Failed to get staged diff")
-
-    # Warn user if diff is very large
-    if len(full_diff) > 100000:
-        click.echo(
-            click.style(
-                f"Warning: Staged diff is very large ({len(full_diff)} chars). "
-                "Consider splitting into smaller commits.",
-                fg="yellow",
-            )
-        )
-
-    # Split diff into chunks for incremental delivery
-    diff_chunks = chunk_diff(full_diff)
-    diff_chunk_idx = 0
-    verbose_echo(verbose, f"Diff split into {len(diff_chunks)} chunk(s)")
-    if verbose and len(diff_chunks) > 1:
-        for i, chunk in enumerate(diff_chunks):
-            verbose_echo(verbose, f"  Chunk {i}: {len(chunk)} chars")
-
-    # Check for AGENTS.md
-    agents_md_content = find_agents_md(repo)
-    if agents_md_content:
-        click.echo("Found AGENTS.md, including project conventions.")
-        verbose_echo(verbose, f"AGENTS.md length: {len(agents_md_content)} characters")
-    else:
-        verbose_echo(verbose, "No AGENTS.md found")
-
-    # Append AGENTS.md to system prompt
-    system_prompt = config.system_prompt
-    if agents_md_content:
-        system_prompt = system_prompt + "\n\nProject conventions (from AGENTS.md):\n" + agents_md_content
-
-    # Get current branch
-    current_branch = get_current_branch(repo)
-    if current_branch:
-        verbose_echo(verbose, f"Current branch: {current_branch}")
-    else:
-        verbose_echo(verbose, "No current branch (new repo without commits)")
-
-    # Generate the base prompt (diff is delivered separately via chunks)
-    prompt = build_prompt(
-        recent_commits,
-        files_info=staged_files,
-        total_chunks=len(diff_chunks),
-    )
-    if current_branch:
-        prompt = f"Current branch: {current_branch}\n\n" + prompt
-
-    # Deliver chunk 0 automatically merged into the prompt message
-    assert diff_chunks, "diff_chunks should not be empty"
-    chunk0_msg = format_diff_chunk(diff_chunks[0], len(diff_chunks), 0)
-    prompt = prompt + "\n\n" + chunk0_msg
-
-    verbose_echo(verbose, f"User prompt length: {len(prompt)} characters")
-    verbose_echo(
-        verbose,
-        f"Diff chunk 0: {len(diff_chunks[0])} chars (total {len(diff_chunks)} chunk(s))"
-    )
-    if verbose:
-        click.echo(click.style("[verbose] System prompt:", fg="magenta"))
-        click.echo("-" * 40)
-        click.echo(system_prompt)
-        click.echo("-" * 40)
-        click.echo(click.style("[verbose] User prompt:", fg="magenta"))
-        click.echo("-" * 40)
-        click.echo(prompt)
-        click.echo("-" * 40)
-
-    # Create LLM provider
-    try:
-        llm_provider = create_provider(
-            config.provider,
-            config.api_key,
-            config.model,
-            config.api_base or None,
-            config.context_window,
-        )
-    except Exception as e:
-        click.echo(f"Error creating LLM provider: {e}", err=True)
-        raise click.ClickException(str(e))
-
-    # Build initial messages: prompt includes chunk 0
-    messages = [
-        {"role": "user", "content": prompt},
-    ]
-
-    # Tool call loop
+    Returns the chosen message, or None if the user cancelled or max retries reached.
+    """
     max_tool_calls = 32
     tool_call_count = 0
     retry_count = 0
     max_retries = 3
+    diff_chunk_idx = 0
 
-    click.echo(
-        click.style(f"Using provider: {config.active_provider_name} ({config.model})", fg="bright_black")
-    )
-
-    click.echo()
     spinner = Spinner(text="Thinking...")
     spinner.start()
 
     try:
         while tool_call_count < max_tool_calls:
-            verbose_echo(verbose, f"Sending request to {config.provider} ({config.model})...")
+            verbose_echo(verbose, f"Sending request to {provider_name} ({model_name})...")
             if verbose and messages:
                 verbose_echo(verbose, f"Messages count: {len(messages)}")
 
@@ -415,9 +253,8 @@ def main(provider, model, api_key, api_base, yes, verbose):
                     click.echo()
 
                     if yes:
-                        click.echo("Auto-committing (--yes flag set)...")
-                        commit_changes(repo, message)
-                        return
+                        click.echo(f"Auto-{action_label} (--yes flag set)...")
+                        return message
 
                     answer = click.prompt(
                         "Accept? [Y/n/feedback]",
@@ -426,13 +263,12 @@ def main(provider, model, api_key, api_base, yes, verbose):
                     )
                     answer = answer.strip()
                     if answer.lower() in ("y", ""):
-                        commit_changes(repo, message)
-                        return
+                        return message
                     else:
                         retry_count += 1
                         if retry_count > max_retries:
                             click.echo("Max retries reached. Commit cancelled.")
-                            return
+                            return None
 
                         if answer.lower() == "n":
                             feedback = "I refuse current commit message"
@@ -584,7 +420,327 @@ def main(provider, model, api_key, api_base, yes, verbose):
         raise click.ClickException(str(e))
 
     click.echo("Error: Max tool calls reached without a valid commit message.", err=True)
-    raise click.ClickException("Failed to generate commit message")
+    return None
+
+
+def generate_message_from_diff(
+    repo,
+    config,
+    recent_commits: List[str],
+    full_diff: str,
+    files_info: Optional[List[Dict[str, str]]],
+    current_branch: Optional[str],
+    hint: Optional[str],
+    rewrite_context: Optional[Dict[str, str]],
+    yes: bool,
+    verbose: bool,
+    allow_empty_diff: bool = False,
+    diff_label: str = "Diff",
+    action_label: str = "committing",
+) -> Optional[str]:
+    """Prepare prompts and run the LLM generation loop for a given diff."""
+    if not full_diff.strip():
+        if not allow_empty_diff:
+            click.echo("Error: Could not retrieve diff.", err=True)
+            raise click.ClickException("Failed to get diff")
+        verbose_echo(verbose, "Diff is empty")
+
+    if len(full_diff) > 100000:
+        click.echo(
+            click.style(
+                f"Warning: {diff_label} is very large ({len(full_diff)} chars). "
+                "Consider splitting into smaller commits.",
+                fg="yellow",
+            )
+        )
+
+    diff_chunks = chunk_diff(full_diff)
+    verbose_echo(verbose, f"Diff split into {len(diff_chunks)} chunk(s)")
+    if verbose and len(diff_chunks) > 1:
+        for i, chunk in enumerate(diff_chunks):
+            verbose_echo(verbose, f"  Chunk {i}: {len(chunk)} chars")
+
+    # Check for AGENTS.md
+    agents_md_content = find_agents_md(repo)
+    if agents_md_content:
+        click.echo("Found AGENTS.md, including project conventions.")
+        verbose_echo(verbose, f"AGENTS.md length: {len(agents_md_content)} characters")
+    else:
+        verbose_echo(verbose, "No AGENTS.md found")
+
+    # Append AGENTS.md to system prompt
+    system_prompt = config.system_prompt
+    if agents_md_content:
+        system_prompt = system_prompt + "\n\nProject conventions (from AGENTS.md):\n" + agents_md_content
+
+    # Generate the base prompt (diff is delivered separately via chunks)
+    prompt = build_prompt(
+        recent_commits,
+        files_info=files_info,
+        total_chunks=len(diff_chunks),
+        hint=hint,
+        rewrite_context=rewrite_context,
+    )
+    if current_branch:
+        prompt = f"Current branch: {current_branch}\n\n" + prompt
+
+    # Deliver chunk 0 automatically merged into the prompt message
+    assert diff_chunks, "diff_chunks should not be empty"
+    chunk0_msg = format_diff_chunk(diff_chunks[0], len(diff_chunks), 0)
+    prompt = prompt + "\n\n" + chunk0_msg
+
+    verbose_echo(verbose, f"User prompt length: {len(prompt)} characters")
+    verbose_echo(
+        verbose,
+        f"Diff chunk 0: {len(diff_chunks[0])} chars (total {len(diff_chunks)} chunk(s))"
+    )
+    if verbose:
+        click.echo(click.style("[verbose] System prompt:", fg="magenta"))
+        click.echo("-" * 40)
+        click.echo(system_prompt)
+        click.echo("-" * 40)
+        click.echo(click.style("[verbose] User prompt:", fg="magenta"))
+        click.echo("-" * 40)
+        click.echo(prompt)
+        click.echo("-" * 40)
+
+    # Create LLM provider
+    try:
+        llm_provider = create_provider(
+            config.provider,
+            config.api_key,
+            config.model,
+            config.api_base or None,
+            config.context_window,
+        )
+    except Exception as e:
+        click.echo(f"Error creating LLM provider: {e}", err=True)
+        raise click.ClickException(str(e))
+
+    # Build initial messages: prompt includes chunk 0
+    messages = [
+        {"role": "user", "content": prompt},
+    ]
+
+    click.echo(
+        click.style(f"Using provider: {config.active_provider_name} ({config.model})", fg="bright_black")
+    )
+    click.echo()
+
+    return generate_commit_message(
+        llm_provider,
+        system_prompt,
+        messages,
+        diff_chunks,
+        repo,
+        yes,
+        verbose,
+        config.provider,
+        config.model,
+        action_label=action_label,
+    )
+
+
+@click.command()
+@click.option("--provider", help="LLM provider (openai or anthropic)")
+@click.option("--model", help="Model name")
+@click.option("--api-key", help="API key")
+@click.option("--api-base", help="Custom API base URL")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation and commit directly")
+@click.option("--verbose", is_flag=True, help="Enable verbose output for debugging")
+@click.option("-r", "--rewrite", is_flag=True, help="Rewrite an existing commit message")
+@click.argument("args", nargs=-1)
+@click.version_option(version="0.1.0")
+def main(provider, model, api_key, api_base, yes, verbose, rewrite, args):
+    """AI-powered git commit message generator."""
+    # Initialize configuration
+    config = Config()
+
+    # Set CLI overrides
+    config.set_cli_override("provider", provider)
+    config.set_cli_override("model", model)
+    config.set_cli_override("api_key", api_key)
+    config.set_cli_override("api_base", api_base)
+
+    # Load configuration
+    config.load()
+
+    # Interactive setup if not configured
+    if not config.is_configured():
+        click.echo("No configuration found.")
+        interactive_setup(config)
+        config.load()  # Reload after setup
+
+    # Check if we're in a git repository
+    current_dir = Path.cwd()
+    if not is_git_repo(current_dir):
+        click.echo("Error: Not a git repository.", err=True)
+        raise click.ClickException("Not a git repository")
+
+    # Get repository
+    repo = get_repo(current_dir)
+
+    # Get user config
+    user_config = get_user_config(repo)
+    user_name = user_config["name"]
+    user_email = user_config["email"]
+
+    click.echo(f"Git user: {user_name} <{user_email}>")
+    verbose_echo(verbose, f"Working directory: {current_dir}")
+    verbose_echo(verbose, f"Repo path: {repo.working_tree_dir}")
+
+    # Check if user appears in history
+    if not check_user_in_history(repo, user_name, user_email):
+        click.echo()
+        click.echo(
+            "Warning: Your git user name or email does not appear in recent commit history."
+        )
+        click.echo("This might indicate incorrect git configuration.")
+
+        if not click.confirm("Do you want to continue?"):
+            click.echo("Aborted.")
+            return
+
+    # Get recent commits
+    recent_commits = get_recent_commits(repo, n=5)
+    click.echo(f"Found {len(recent_commits)} recent commits")
+    if verbose and recent_commits:
+        for i, commit in enumerate(recent_commits, 1):
+            first_line = commit.split("\n")[0]
+            verbose_echo(verbose, f"  Commit {i}: {first_line}")
+
+    # Get current branch
+    current_branch = get_current_branch(repo)
+    if current_branch:
+        verbose_echo(verbose, f"Current branch: {current_branch}")
+    else:
+        verbose_echo(verbose, "No current branch (new repo without commits)")
+
+    if rewrite:
+        # Try to interpret the first positional arg as a commit id;
+        # otherwise treat it (and any following text) as a user hint for HEAD.
+        commit_id = "HEAD"
+        hint = " ".join(args)
+        if args:
+            try:
+                repo.commit(args[0])
+                commit_id = args[0]
+                hint = " ".join(args[1:])
+            except Exception:
+                pass
+
+        try:
+            target_commit = repo.commit(commit_id)
+        except Exception:
+            click.echo(f"Error: Invalid commit '{commit_id}'.", err=True)
+            raise click.ClickException(f"Invalid commit: {commit_id}")
+
+        warnings = []
+        if target_commit != repo.head.commit:
+            warnings.append(
+                "This will rewrite a historical commit. All commits after it will get new hashes."
+            )
+        if is_commit_pushed(repo, target_commit.hexsha):
+            warnings.append(
+                "This commit appears to have been pushed to a remote. Rewriting it may affect collaborators."
+            )
+
+        if warnings:
+            click.echo()
+            for warning in warnings:
+                click.echo(click.style(f"Warning: {warning}", fg="yellow"))
+            if not click.confirm("Do you want to continue?"):
+                click.echo("Aborted.")
+                return
+
+        stash_ref = None
+        try:
+            if has_uncommitted_changes(repo):
+                stash_ref = stash_changes(repo, "git-cm rewrite backup")
+
+            full_diff = get_commit_diff(repo, target_commit.hexsha)
+            rewrite_context = {
+                "original_message": target_commit.message,
+                "commit_sha": target_commit.hexsha,
+                "commit_summary": target_commit.summary,
+            }
+
+            message = generate_message_from_diff(
+                repo,
+                config,
+                recent_commits,
+                full_diff,
+                files_info=None,
+                current_branch=current_branch,
+                hint=hint,
+                rewrite_context=rewrite_context,
+                yes=yes,
+                verbose=verbose,
+                allow_empty_diff=True,
+                diff_label="Target commit diff",
+                action_label="applying",
+            )
+            if message is None:
+                return
+
+            rewrite_commit_message(repo, target_commit.hexsha, message)
+            click.echo(f"Rewrote commit message: {message}")
+
+        except click.ClickException:
+            if is_rebasing(repo):
+                abort_rebase(repo)
+            raise
+        except Exception as e:
+            if is_rebasing(repo):
+                abort_rebase(repo)
+            click.echo(f"Error rewriting commit: {e}", err=True)
+            raise click.ClickException(str(e))
+        finally:
+            if stash_ref:
+                try:
+                    pop_stash(repo, stash_ref)
+                except Exception as e:
+                    click.echo(f"Warning: failed to restore stash: {e}", err=True)
+
+    else:
+        # Normal mode: create a new commit from staged changes
+        hint = " ".join(args)
+
+        # Check for staged changes
+        if not has_staged_changes(repo):
+            click.echo("Error: No staged changes found.", err=True)
+            click.echo("Use 'git add' to stage changes before running git-cm.", err=True)
+            raise click.ClickException("No staged changes")
+
+        # Get staged files and diff
+        staged_files = get_staged_files(repo)
+        if staged_files:
+            click.echo(f"Found {len(staged_files)} staged file(s)")
+            if verbose:
+                for f in staged_files:
+                    file_type = "binary" if f["is_binary"] == "true" else "text"
+                    verbose_echo(verbose, f"  {f['status']:10} {f['path']} ({file_type})")
+
+        full_diff = get_staged_diff(repo)
+
+        message = generate_message_from_diff(
+            repo,
+            config,
+            recent_commits,
+            full_diff,
+            files_info=staged_files,
+            current_branch=current_branch,
+            hint=hint or None,
+            rewrite_context=None,
+            yes=yes,
+            verbose=verbose,
+            allow_empty_diff=False,
+            diff_label="Staged diff",
+        )
+        if message is None:
+            return
+
+        commit_changes(repo, message)
 
 
 if __name__ == "__main__":

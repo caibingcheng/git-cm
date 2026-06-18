@@ -1,6 +1,8 @@
 """Git operations for git-cm."""
 
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -388,3 +390,193 @@ def grep_repo(repo: Repo, pattern: str, include: Optional[str] = None, max_resul
         return "[Error: grep command not found]"
     except Exception as e:
         return f"[Error: {e}]"
+
+
+def has_uncommitted_changes(repo: Repo) -> bool:
+    """Check if there are staged, unstaged, or untracked changes."""
+    try:
+        return repo.is_dirty(index=True, working_tree=True, untracked_files=True)
+    except Exception:
+        return False
+
+
+def stash_changes(repo: Repo, message: str = "git-cm rewrite backup") -> Optional[str]:
+    """Stash current changes (including untracked) and return the stash ref.
+
+    Returns:
+        Stash commit sha if a stash was created, None if there was nothing to stash.
+    """
+    if not has_uncommitted_changes(repo):
+        return None
+
+    try:
+        output = repo.git.stash("push", "-u", "-m", message)
+        if "No local changes to save" in output:
+            return None
+        return repo.git.rev_parse("refs/stash")
+    except Exception as e:
+        click.echo(f"Error stashing changes: {e}", err=True)
+        raise click.ClickException(str(e))
+
+
+def pop_stash(repo: Repo, expected_ref: str) -> None:
+    """Pop the stash, verifying it is still the expected ref on top."""
+    try:
+        current_top = repo.git.rev_parse("refs/stash")
+    except Exception as e:
+        raise RuntimeError(f"Cannot locate stash to restore: {e}")
+
+    if current_top != expected_ref:
+        raise RuntimeError(
+            f"Stash stack changed unexpectedly. "
+            f"Expected {expected_ref}, found {current_top}. "
+            f"Please run 'git stash list' and restore manually."
+        )
+
+    try:
+        repo.git.stash("pop")
+    except Exception as e:
+        raise RuntimeError(f"Failed to pop stash: {e}")
+
+
+def is_rebasing(repo: Repo) -> bool:
+    """Check whether a rebase is currently in progress."""
+    git_dir = Path(repo.git_dir)
+    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+
+def abort_rebase(repo: Repo) -> None:
+    """Abort an in-progress rebase, ignoring errors."""
+    try:
+        repo.git.rebase("--abort")
+    except Exception:
+        pass
+
+
+def get_commit_diff(repo: Repo, commit_sha: str) -> str:
+    """Get the diff of a specific commit relative to its first parent."""
+    try:
+        diff = repo.git.show(
+            commit_sha,
+            "-p",
+            "--format=",
+            "--binary",
+            "--find-renames",
+        )
+        return diff
+    except Exception as e:
+        click.echo(f"Warning: Failed to get commit diff: {e}", err=True)
+        return ""
+
+
+def is_commit_pushed(repo: Repo, commit_sha: str) -> bool:
+    """Check if a commit exists on any remote tracking branch."""
+    try:
+        output = repo.git.branch("-r", "--contains", commit_sha)
+        return bool(output.strip())
+    except Exception:
+        return False
+
+
+def _build_editor_script(content_template: str) -> str:
+    """Create a temporary executable script and return its path."""
+    fd, path = tempfile.mkstemp(suffix=".py")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content_template)
+    except Exception:
+        os.close(fd)
+        raise
+    os.chmod(path, 0o755)
+    return path
+
+
+def rewrite_commit_message(repo: Repo, commit_sha: str, new_message: str) -> None:
+    """Rewrite the message of an arbitrary commit.
+
+    Supports HEAD amend, intermediate commits via rebase, and root commits.
+    """
+    commit = repo.commit(commit_sha)
+    head_commit = repo.head.commit
+
+    # HEAD: simple amend
+    if commit == head_commit:
+        try:
+            repo.git.commit("--amend", "-m", new_message)
+        except Exception as e:
+            click.echo(f"Error amending commit: {e}", err=True)
+            raise click.ClickException(str(e))
+        return
+
+    parents = commit.parents
+
+    # Root commit
+    if not parents:
+        try:
+            new_sha = repo.git.commit_tree(commit.tree.hexsha, "-m", new_message)
+            if head_commit == commit:
+                repo.git.update_ref("HEAD", new_sha)
+            else:
+                repo.git.rebase("--onto", new_sha, "--root")
+        except Exception as e:
+            click.echo(f"Error rewriting root commit: {e}", err=True)
+            raise click.ClickException(str(e))
+        return
+
+    # Intermediate commit: interactive rebase with editor scripts
+    parent_sha = parents[0].hexsha
+    target_prefix = commit_sha[:7]
+
+    seq_editor_script = _build_editor_script(
+        f"""#!/usr/bin/env python3
+import sys
+path = sys.argv[1]
+with open(path, "r") as f:
+    lines = f.readlines()
+with open(path, "w") as f:
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "pick" and parts[1].startswith("{target_prefix}"):
+            f.write(line.replace("pick ", "reword ", 1))
+        else:
+            f.write(line)
+"""
+    )
+
+    msg_editor_script = _build_editor_script(
+        f"""#!/usr/bin/env python3
+import sys
+with open(sys.argv[1], "w") as f:
+    f.write({repr(new_message)})
+"""
+    )
+
+    env = os.environ.copy()
+    env["GIT_SEQUENCE_EDITOR"] = seq_editor_script
+    env["GIT_EDITOR"] = msg_editor_script
+
+    try:
+        result = subprocess.run(
+            ["git", "rebase", "-i", parent_sha],
+            cwd=str(repo.working_tree_dir),
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip() if e.stderr else str(e)
+        click.echo(f"Error rewriting commit via rebase: {stderr}", err=True)
+        raise click.ClickException(f"Failed to rewrite commit: {stderr}")
+    except Exception as e:
+        click.echo(f"Error rewriting commit: {e}", err=True)
+        raise click.ClickException(str(e))
+    finally:
+        try:
+            os.unlink(seq_editor_script)
+        except Exception:
+            pass
+        try:
+            os.unlink(msg_editor_script)
+        except Exception:
+            pass
