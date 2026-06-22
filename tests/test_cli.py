@@ -65,6 +65,34 @@ def temp_git_repo(tmp_path):
 
 
 @pytest.fixture
+def repo_with_merge_conflict(temp_git_repo):
+    """Create a repo with an unresolved merge conflict."""
+    repo = Repo(temp_git_repo)
+    base_file = temp_git_repo / "conflict.txt"
+    base_file.write_text("base content")
+    repo.index.add([str(base_file)])
+    repo.index.commit("base")
+
+    repo.create_head("feature")
+    repo.heads.feature.checkout()
+    base_file.write_text("feature content")
+    repo.index.add([str(base_file)])
+    repo.index.commit("feature change")
+
+    repo.heads.master.checkout()
+    base_file.write_text("master content")
+    repo.index.add([str(base_file)])
+    repo.index.commit("master change")
+
+    try:
+        repo.git.merge("feature")
+    except Exception:
+        pass
+
+    return temp_git_repo
+
+
+@pytest.fixture
 def mock_config():
     """Create a mock config for testing."""
     config = MagicMock()
@@ -104,6 +132,31 @@ class TestCLIBasicChecks:
                 
                 assert result.exit_code == 1
                 assert "No staged changes" in result.output
+            finally:
+                os.chdir(old_cwd)
+
+    def test_unmerged_entries_prevent_commit(
+        self, cli_runner, repo_with_merge_conflict, mock_config
+    ):
+        """Test error when there are unmerged index entries."""
+        repo = Repo(repo_with_merge_conflict)
+        # Stage an additional file so has_staged_changes passes
+        extra_file = repo_with_merge_conflict / "extra.txt"
+        extra_file.write_text("extra")
+        repo.index.add([str(extra_file)])
+
+        with patch("git_cm.cli.Config") as mock_config_class:
+            mock_config_class.return_value = mock_config
+
+            old_cwd = os.getcwd()
+            os.chdir(str(repo_with_merge_conflict))
+            try:
+                result = cli_runner.invoke(main, ["--yes"])
+
+                assert result.exit_code == 1
+                assert "Cannot commit because there are unmerged entries" in result.output
+                assert "conflict.txt" in result.output
+                assert "Resolve the conflicts" in result.output
             finally:
                 os.chdir(old_cwd)
 

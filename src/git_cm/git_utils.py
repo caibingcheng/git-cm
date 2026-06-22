@@ -181,11 +181,36 @@ def get_staged_diff(repo: Repo) -> str:
         return ""
 
 
+def get_unmerged_files(repo: Repo) -> List[str]:
+    """Return paths of files that have unmerged index entries."""
+    try:
+        return sorted(
+            {
+                blob.path
+                for entries in repo.index.unmerged_blobs().values()
+                for _stage, blob in entries
+            }
+        )
+    except Exception:
+        return []
+
+
 def commit_changes(repo: Repo, message: str) -> None:
     """Commit staged changes with the given message."""
     try:
         repo.index.commit(message)
         click.echo(f"Committed: {message}")
+    except git.exc.UnmergedEntriesError as e:
+        unmerged = get_unmerged_files(repo)
+        files_list = "\n  ".join(unmerged) if unmerged else str(e)
+        click.echo(
+            "Error: Cannot commit because there are unmerged entries in the index.\n"
+            "This usually happens during an unfinished merge or rebase.\n"
+            "Unmerged files:\n  " + files_list + "\n"
+            "Resolve the conflicts, run 'git add <file>', then commit.",
+            err=True,
+        )
+        raise click.ClickException("Unmerged entries prevent commit")
     except (git.GitCommandError, OSError) as e:
         click.echo(f"Error committing changes: {e}", err=True)
         raise click.ClickException(str(e))

@@ -12,14 +12,15 @@ from git_cm.git_utils import (
     abort_rebase,
     _build_editor_script,
     _unlink_safely,
+    commit_changes,
+    find_agents_md,
     get_commit_diff,
     get_current_branch,
     check_user_in_history,
-    commit_changes,
-    find_agents_md,
     get_recent_commits,
     get_repo,
     get_staged_diff,
+    get_unmerged_files,
     get_user_config,
     grep_repo,
     has_staged_changes,
@@ -55,6 +56,34 @@ def temp_git_repo(tmp_path):
     repo.index.commit("initial commit")
     
     return repo_path
+
+
+@pytest.fixture
+def repo_with_merge_conflict(temp_git_repo):
+    """Create a repo with an unresolved merge conflict."""
+    repo = get_repo(temp_git_repo)
+    base_file = temp_git_repo / "conflict.txt"
+    base_file.write_text("base content")
+    repo.index.add([str(base_file)])
+    repo.index.commit("base")
+
+    repo.create_head("feature")
+    repo.heads.feature.checkout()
+    base_file.write_text("feature content")
+    repo.index.add([str(base_file)])
+    repo.index.commit("feature change")
+
+    repo.heads.master.checkout()
+    base_file.write_text("master content")
+    repo.index.add([str(base_file)])
+    repo.index.commit("master change")
+
+    try:
+        repo.git.merge("feature")
+    except Exception:
+        pass
+
+    return temp_git_repo
 
 
 class TestGitRepoChecks:
@@ -226,6 +255,31 @@ class TestCommit:
         # Verify commit was made
         latest_commit = list(repo.iter_commits("HEAD", max_count=1))[0]
         assert latest_commit.message.strip() == "feat: add new file"
+
+
+class TestUnmergedEntries:
+    """Test detection and handling of unmerged index entries."""
+
+    def test_get_unmerged_files_clean(self, temp_git_repo):
+        """Test clean repo returns empty list."""
+        repo = get_repo(temp_git_repo)
+        assert get_unmerged_files(repo) == []
+
+    def test_get_unmerged_files_with_conflict(self, repo_with_merge_conflict):
+        """Test unresolved merge conflict returns conflict file."""
+        repo = get_repo(repo_with_merge_conflict)
+        assert get_unmerged_files(repo) == ["conflict.txt"]
+
+    def test_commit_changes_unmerged_entries(self, repo_with_merge_conflict, capsys):
+        """Test commit raises ClickException with friendly message."""
+        repo = get_repo(repo_with_merge_conflict)
+
+        with pytest.raises(click.ClickException, match="Unmerged entries prevent commit"):
+            commit_changes(repo, "feat: should fail")
+
+        captured = capsys.readouterr()
+        assert "Cannot commit because there are unmerged entries" in captured.err
+        assert "conflict.txt" in captured.err
 
 
 class TestReadFile:

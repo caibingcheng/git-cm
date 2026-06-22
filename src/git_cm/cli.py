@@ -23,6 +23,7 @@ from git_cm.git_utils import (
     get_repo,
     get_staged_diff,
     get_staged_files,
+    get_unmerged_files,
     get_user_config,
     grep_repo,
     has_staged_changes,
@@ -788,6 +789,22 @@ def main(
             click.echo("Error: No staged changes found.", err=True)
             click.echo("Use 'git add' to stage changes before running git-cm.", err=True)
             raise click.ClickException("No staged changes")
+
+        # Check for unmerged entries from an unfinished merge/rebase
+        unmerged_files = get_unmerged_files(repo)
+        if unmerged_files:
+            click.echo(
+                "Error: Cannot commit because there are unmerged entries in the index.",
+                err=True,
+            )
+            click.echo("Unmerged files:", err=True)
+            for path in unmerged_files:
+                click.echo(f"  {path}", err=True)
+            click.echo(
+                "Resolve the conflicts and run 'git add <file>' before using git-cm.",
+                err=True,
+            )
+            raise click.ClickException("Unmerged entries prevent commit")
 
         # Get staged files and diff
         staged_files = get_staged_files(repo)
