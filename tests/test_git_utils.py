@@ -16,6 +16,7 @@ from git_cm.git_utils import (
     find_agents_md,
     get_commit_diff,
     get_current_branch,
+    get_git_version,
     check_user_in_history,
     get_recent_commits,
     get_repo,
@@ -492,6 +493,70 @@ class TestGrepRepo:
         # Last line should be truncation note
         assert "[Note:" in lines[-1]
         assert "total matches" in lines[-1]
+
+
+class TestGitVersion:
+    """Test version derivation from git tags."""
+
+    def test_version_on_vtag(self, temp_git_repo):
+        """Test returning the vtag when HEAD is tagged."""
+        repo = get_repo(temp_git_repo)
+        repo.create_tag("v1.2.3")
+
+        assert get_git_version(repo) == "v1.2.3"
+
+    def test_version_after_vtag(self, temp_git_repo):
+        """Test appending short sha to nearest vtag."""
+        repo = get_repo(temp_git_repo)
+        repo.create_tag("v1.0.0")
+
+        new_file = temp_git_repo / "feature.txt"
+        new_file.write_text("new content")
+        repo.index.add([str(new_file)])
+        commit = repo.index.commit("add feature")
+
+        version = get_git_version(repo)
+        assert version.startswith("v1.0.0-")
+        assert commit.hexsha[:7] in version
+
+    def test_version_no_vtag(self, temp_git_repo):
+        """Test returning short sha when no vtag exists."""
+        repo = get_repo(temp_git_repo)
+
+        new_file = temp_git_repo / "feature.txt"
+        new_file.write_text("new content")
+        repo.index.add([str(new_file)])
+        commit = repo.index.commit("add feature")
+
+        assert get_git_version(repo) == commit.hexsha[:7]
+
+    def test_version_multiple_vtags_on_head(self, temp_git_repo):
+        """Test returning the highest vtag when multiple exist on HEAD."""
+        repo = get_repo(temp_git_repo)
+        repo.create_tag("v1.0.0")
+        repo.create_tag("v1.1.0")
+
+        assert get_git_version(repo) == "v1.1.0"
+
+    def test_version_ignores_non_v_tags(self, temp_git_repo):
+        """Test non-v tags are ignored for version calculation."""
+        repo = get_repo(temp_git_repo)
+        repo.create_tag("release-1.0.0")
+
+        new_file = temp_git_repo / "feature.txt"
+        new_file.write_text("new content")
+        repo.index.add([str(new_file)])
+        commit = repo.index.commit("add feature")
+
+        assert get_git_version(repo) == commit.hexsha[:7]
+
+    def test_version_no_commits(self, tmp_path):
+        """Test new repo without commits returns unknown."""
+        repo_path = tmp_path / "empty-repo"
+        repo_path.mkdir()
+        repo = Repo.init(repo_path)
+
+        assert get_git_version(repo) == "unknown"
 
 
 class TestGetCurrentBranch:

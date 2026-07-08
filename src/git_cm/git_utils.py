@@ -26,6 +26,61 @@ def get_repo(path: Path) -> Repo:
     return Repo(path, search_parent_directories=True)
 
 
+def get_git_version(repo: Repo) -> str:
+    """Return a version string based on version tags in the repository.
+
+    Rules:
+    1. If HEAD has a vtag, return that vtag.
+    2. If HEAD has no vtag, return 'nearest_vtag-short_sha'.
+    3. If no vtag exists at all, return 'short_sha'.
+    """
+    try:
+        head = repo.head.commit
+    except (ValueError, TypeError, AttributeError):
+        return "unknown"
+
+    head_sha = head.hexsha
+    short_sha = head_sha[:7]
+
+    # Find all vtags that point to HEAD
+    head_tags = [
+        tag.name
+        for tag in repo.tags
+        if tag.name.startswith("v") and tag.commit.hexsha == head_sha
+    ]
+    if head_tags:
+        return sorted(head_tags)[-1]
+
+    # Find nearest vtag that is an ancestor of HEAD
+    nearest_tag: Optional[str] = None
+    min_distance: Optional[int] = None
+    for tag in repo.tags:
+        if not tag.name.startswith("v"):
+            continue
+        tag_sha = tag.commit.hexsha
+        try:
+            repo.git.merge_base("--is-ancestor", tag_sha, head_sha)
+        except git.GitCommandError:
+            continue
+
+        try:
+            distance = int(repo.git.rev_list("--count", f"{tag_sha}..{head_sha}"))
+        except (git.GitCommandError, ValueError):
+            continue
+
+        if distance <= 0:
+            continue
+
+        if min_distance is None or distance < min_distance:
+            min_distance = distance
+            nearest_tag = tag.name
+
+    if nearest_tag is not None:
+        return f"{nearest_tag}-{short_sha}"
+
+    return short_sha
+
+
 def has_staged_changes(repo: Repo) -> bool:
     """Check if there are staged changes in the repository."""
     try:

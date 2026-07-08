@@ -8,7 +8,8 @@ import pytest
 from click.testing import CliRunner
 from git import Repo
 
-from git_cm.cli import main, show_reasoning
+from git_cm import __version__ as VERSION
+from git_cm.cli import generate_commit_message, main, show_reasoning
 from git_cm.llm import LLMResponse
 
 
@@ -107,6 +108,14 @@ def mock_config():
 
 class TestCLIBasicChecks:
     """Test basic CLI checks."""
+
+    def test_version_flag(self, cli_runner):
+        """Test --version prints the version."""
+        result = cli_runner.invoke(main, ["--version"])
+
+        assert result.exit_code == 0
+        assert "git-cm" in result.output
+        assert VERSION in result.output
 
     def test_not_git_repo(self, cli_runner, tmp_path, mock_config):
         """Test error when not in a git repo."""
@@ -245,6 +254,27 @@ class TestCLIWithStagedChanges:
                     assert result.exit_code == 0
                     assert "feat: add new feature" in result.output
                     assert "Committed:" in result.output
+                finally:
+                    os.chdir(old_cwd)
+
+    def test_version_printed_on_normal_run(self, cli_runner, repo_with_changes, mock_config):
+        """Test that version is printed at startup."""
+        with patch("git_cm.cli.create_provider") as mock_create:
+            mock_provider = MagicMock()
+            mock_provider.generate.return_value = message_tool_response("feat: test")
+            mock_create.return_value = mock_provider
+            
+            with patch("git_cm.cli.Config") as mock_config_class:
+                mock_config_class.return_value = mock_config
+                
+                old_cwd = os.getcwd()
+                os.chdir(str(repo_with_changes))
+                try:
+                    result = cli_runner.invoke(main, ["--yes"])
+                    
+                    assert result.exit_code == 0
+                    assert "git-cm version" in result.output
+                    assert VERSION in result.output
                 finally:
                     os.chdir(old_cwd)
 
@@ -1225,3 +1255,94 @@ class TestCLIRewriteAndHint:
                 assert "Cannot provide both --hint and a positional hint" in result.output
             finally:
                 os.chdir(old_cwd)
+
+
+class TestReasoningContent:
+    """Test reasoning_content preservation in multi-turn conversations."""
+
+    def test_reasoning_content_preserved_for_tool_calls(self, temp_git_repo):
+        """Test reasoning_content is passed back in assistant message with tool calls."""
+        repo = Repo(temp_git_repo)
+        mock_provider = MagicMock()
+        mock_provider.generate.side_effect = [
+            LLMResponse(
+                tool_calls=[{
+                    "id": "call_diff_more",
+                    "name": "diff_more",
+                    "arguments": {},
+                }],
+                reasoning_content="Need more diff context",
+            ),
+            LLMResponse(
+                tool_calls=[{
+                    "id": "call_message",
+                    "name": "message",
+                    "arguments": {"message": "feat: test commit"},
+                }],
+                reasoning_content="Ready to propose message",
+            ),
+        ]
+
+        messages = [{"role": "user", "content": "test prompt"}]
+        result = generate_commit_message(
+            llm_provider=mock_provider,
+            system_prompt="system prompt",
+            messages=messages,
+            diff_chunks=["chunk 0", "chunk 1"],
+            repo=repo,
+            yes=True,
+            verbose=False,
+            provider_name="test",
+            model_name="test",
+        )
+
+        assert result == "feat: test commit"
+        assert mock_provider.generate.call_count == 2
+        second_call_messages = mock_provider.generate.call_args_list[1][0][1]
+        assistant_msg = second_call_messages[1]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["reasoning_content"] == "Need more diff context"
+        assert assistant_msg["content"] == ""
+        assert len(assistant_msg["tool_calls"]) == 1
+        assert assistant_msg["tool_calls"][0]["function"]["name"] == "diff_more"
+
+    def test_reasoning_content_omitted_when_empty(self, temp_git_repo):
+        """Test reasoning_content key is omitted when not present."""
+        repo = Repo(temp_git_repo)
+        mock_provider = MagicMock()
+        mock_provider.generate.side_effect = [
+            LLMResponse(
+                tool_calls=[{
+                    "id": "call_diff_more",
+                    "name": "diff_more",
+                    "arguments": {},
+                }],
+            ),
+            LLMResponse(
+                tool_calls=[{
+                    "id": "call_message",
+                    "name": "message",
+                    "arguments": {"message": "feat: test commit"},
+                }],
+            ),
+        ]
+
+        messages = [{"role": "user", "content": "test prompt"}]
+        result = generate_commit_message(
+            llm_provider=mock_provider,
+            system_prompt="system prompt",
+            messages=messages,
+            diff_chunks=["chunk 0", "chunk 1"],
+            repo=repo,
+            yes=True,
+            verbose=False,
+            provider_name="test",
+            model_name="test",
+        )
+
+        assert result == "feat: test commit"
+        assert mock_provider.generate.call_count == 2
+        second_call_messages = mock_provider.generate.call_args_list[1][0][1]
+        assistant_msg = second_call_messages[1]
+        assert assistant_msg["role"] == "assistant"
+        assert "reasoning_content" not in assistant_msg

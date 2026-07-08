@@ -1,3 +1,5 @@
 """git-cm: AI-powered git commit message generator."""
 
-__version__ = "0.1.0"
+from git_cm.version import get_version
+
+__version__ = get_version()

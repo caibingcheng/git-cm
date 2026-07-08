@@ -11,6 +11,7 @@ import click
 import git
 from git import Repo
 
+from git_cm import __version__ as VERSION
 from git_cm.config import Config, interactive_setup
 from git_cm.git_utils import (
     abort_rebase,
@@ -405,23 +406,24 @@ def generate_commit_message(
                         )
 
             # Append assistant's tool calls to messages (preserve message text)
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": response.message,
-                    "tool_calls": [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc["arguments"]),
-                            },
-                        }
-                        for tc in response.tool_calls
-                    ],
-                }
-            )
+            assistant_message = {
+                "role": "assistant",
+                "content": response.message,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["arguments"]),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ],
+            }
+            if response.reasoning_content:
+                assistant_message["reasoning_content"] = response.reasoning_content
+            messages.append(assistant_message)
 
             # Append tool results
             for tr in tool_results:
@@ -582,7 +584,7 @@ def generate_message_from_diff(
 @click.option("-t", "--to", default=None, help="Commit to rewrite (default: HEAD)")
 @click.option("-m", "--hint", default=None, help="User hint for commit message")
 @click.argument("args", nargs=-1)
-@click.version_option(version="0.1.0")
+@click.version_option(version=VERSION, prog_name="git-cm")
 def main(
     provider: Optional[str],
     model: Optional[str],
@@ -619,6 +621,8 @@ def main(
         click.echo("No configuration found.")
         interactive_setup(config)
         config.load()  # Reload after setup
+
+    click.echo(click.style(f"git-cm version {VERSION}", fg="bright_black"))
 
     # Check if we're in a git repository
     current_dir = Path.cwd()
